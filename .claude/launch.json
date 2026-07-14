@@ -2,11 +2,19 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "Next.js Dev Server",
+      "name": "frontend",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
-      "port": 3000,
+      "port": 5173,
+      "cwd": "frontend",
       "autoPort": true
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.js"],
+      "port": 5000,
+      "cwd": "backend"
     }
   ]
 }
