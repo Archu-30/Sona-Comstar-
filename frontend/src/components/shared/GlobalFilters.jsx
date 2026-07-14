@@ -1,112 +1,162 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { Filter, X, ChevronDown, Search, RotateCcw, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Filter, X, ChevronDown, Search, RotateCcw, ChevronLeft, ChevronRight, Check } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
+/**
+ * CORRECTED Days / Age-Bucket labels.
+ * These MUST match bucketToSql() in backend/routes/reportsDb.js
+ */
 const DAYS_OPTIONS = [
-  '0-30','31-60','61-90','91-180','181-365',
-  '366-730','731-1095','1096-1460','1461-1825','>1825',
+  { value: '0-30 Days',    label: '0–30 Days' },
+  { value: '31-60 Days',   label: '31–60 Days' },
+  { value: '61-90 Days',   label: '61–90 Days' },
+  { value: '91-180 Days',  label: '91–180 Days' },
+  { value: '181-365 Days', label: '181–365 Days' },
+  { value: 'Above 1 Year', label: 'Above 1 Year' },
+  { value: 'Above 2 Years',label: 'Above 2 Years' },
+  { value: 'Above 3 Years',label: 'Above 3 Years' },
+  { value: 'Above 4 Years',label: 'Above 4 Years' },
+  { value: 'Above 5 Years',label: 'Above 5 Years' },
 ];
 
-/* ─── Generic multi-select dropdown ─────────────────────────────────────────── */
-function MultiSelect({ label, options, selected, onChange, searchable = false, maxHeight = 280 }) {
+/* ─── Generic multi-select dropdown (portal-based) ──────────────────────────── */
+function MultiSelect({ label, options, selected, onChange, searchable = false }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const ref = useRef(null);
+  const [pos, setPos] = useState({ top: 0, left: 0, width: 220 });
+  const triggerRef = useRef(null);
+  const dropRef = useRef(null);
 
-  useEffect(() => {
-    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
+  // Normalise options
+  const opts = options.map((o) =>
+    typeof o === 'string'
+      ? { value: o, label: o }
+      : { value: o.value ?? o.v ?? String(o), label: o.label ?? o.l ?? String(o) }
+  );
 
-  const filtered = options.filter((o) => {
-    const text = typeof o === 'string' ? o : o.label || o.material || String(o);
-    return !search || text.toLowerCase().includes(search.toLowerCase());
-  });
+  const filtered = search
+    ? opts.filter((o) => o.label.toLowerCase().includes(search.toLowerCase()))
+    : opts;
 
-  const getValue = (o) => typeof o === 'string' ? o : o.value || o.material || String(o);
-  const getLabel = (o) => typeof o === 'string' ? o : o.label || o.material || String(o);
+  const getValue = (o) => o.value;
+  const getLabel = (o) => o.label;
+  const isSelected = (v) => selected.includes(v);
 
-  const isSelected = (o) => selected.includes(getValue(o));
-
-  const toggle = (o) => {
-    const v = getValue(o);
-    onChange(isSelected(o) ? selected.filter((s) => s !== v) : [...selected, v]);
+  const toggle = (v) => {
+    onChange(isSelected(v) ? selected.filter((s) => s !== v) : [...selected, v]);
   };
 
-  const selectAll = () => onChange(options.map(getValue));
+  const selectAll = () => onChange(opts.map((o) => o.value));
   const clearAll  = () => { onChange([]); setSearch(''); };
 
+  const updatePos = useCallback(() => {
+    if (!triggerRef.current) return;
+    const r = triggerRef.current.getBoundingClientRect();
+    setPos({
+      top:   r.bottom + window.scrollY + 4,
+      left:  r.left   + window.scrollX,
+      width: Math.max(r.width, 220),
+    });
+  }, []);
+
+  const handleOpen = () => { updatePos(); setOpen((p) => !p); };
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => {
+      if (
+        triggerRef.current && !triggerRef.current.contains(e.target) &&
+        dropRef.current    && !dropRef.current.contains(e.target)
+      ) setOpen(false);
+    };
+    const onScroll = () => updatePos();
+    document.addEventListener('mousedown', h);
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', h);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [open, updatePos]);
+
   const summary = selected.length === 0 ? 'All'
-    : selected.length === 1 ? selected[0]
+    : selected.length === 1 ? (opts.find((o) => o.value === selected[0])?.label ?? selected[0])
     : `${selected.length} selected`;
 
+  const dropdown = open ? createPortal(
+    <div
+      ref={dropRef}
+      style={{ position: 'absolute', top: pos.top, left: pos.left, width: pos.width, zIndex: 9999 }}
+      className="rounded-xl border border-border bg-background shadow-2xl overflow-hidden"
+    >
+      {searchable && (
+        <div className="border-b border-border p-2">
+          <div className="relative">
+            <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input
+              autoFocus
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search…"
+              className="h-8 w-full rounded-md border border-border bg-muted/30 pl-7 pr-3 text-xs outline-none focus:border-primary"
+            />
+          </div>
+        </div>
+      )}
+      <div className="flex items-center gap-3 border-b border-border/50 px-3 py-1.5">
+        <button onClick={selectAll} className="text-xs text-primary hover:underline font-medium">Select All</button>
+        <span className="text-border text-xs">|</span>
+        <button onClick={clearAll} className="text-xs text-muted-foreground hover:text-foreground">Clear</button>
+        {selected.length > 0 && (
+          <span className="ml-auto text-xs text-muted-foreground">{selected.length} of {opts.length}</span>
+        )}
+      </div>
+      <div className="max-h-56 overflow-y-auto overscroll-contain">
+        {filtered.length === 0 ? (
+          <p className="py-4 text-center text-xs text-muted-foreground">No options</p>
+        ) : filtered.map((o) => (
+          <label
+            key={o.value}
+            className={cn(
+              'flex cursor-pointer items-center gap-2.5 px-3 py-1.5 hover:bg-muted/50 transition-colors text-sm',
+              isSelected(o.value) && 'bg-primary/5'
+            )}
+          >
+            <span className={cn(
+              'flex size-4 shrink-0 items-center justify-center rounded border transition-colors',
+              isSelected(o.value) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'
+            )}>
+              {isSelected(o.value) && <Check className="size-3" />}
+            </span>
+            <span className="truncate flex-1">{o.label}</span>
+          </label>
+        ))}
+      </div>
+    </div>,
+    document.body
+  ) : null;
+
   return (
-    <div ref={ref} className="relative">
+    <div className="relative">
       <button
-        onClick={() => setOpen((p) => !p)}
+        ref={triggerRef}
+        onClick={handleOpen}
         className={cn(
           'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors min-w-[140px]',
           selected.length > 0
-            ? 'border-primary/60 bg-primary/8 text-primary font-medium'
+            ? 'border-primary/60 bg-primary/5 text-primary font-medium'
             : 'border-border bg-background text-foreground hover:bg-muted/50'
         )}
       >
         <span className="flex-1 text-left truncate">{label}: <span className="opacity-70">{summary}</span></span>
         {selected.length > 0 && (
-          <span
-            className="flex size-4 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground"
-          >{selected.length}</span>
+          <span className="flex size-4 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">
+            {selected.length}
+          </span>
         )}
         <ChevronDown className={cn('size-3.5 shrink-0 transition-transform', open && 'rotate-180')} />
       </button>
-
-      {open && (
-        <div
-          className="absolute left-0 top-full z-50 mt-1 min-w-[200px] rounded-xl border border-border bg-background shadow-lg"
-          style={{ maxHeight: maxHeight + 80 }}
-        >
-          {searchable && (
-            <div className="border-b border-border p-2">
-              <div className="relative">
-                <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                <input
-                  autoFocus
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search…"
-                  className="h-8 w-full rounded-md border border-border bg-muted/30 pl-7 pr-3 text-xs outline-none focus:border-primary"
-                />
-              </div>
-            </div>
-          )}
-
-          <div className="flex gap-2 border-b border-border/50 px-2 py-1.5">
-            <button onClick={selectAll} className="text-xs text-primary hover:underline">All</button>
-            <span className="text-muted-foreground">·</span>
-            <button onClick={clearAll} className="text-xs text-muted-foreground hover:text-foreground">Clear</button>
-          </div>
-
-          <div className="overflow-y-auto" style={{ maxHeight }}>
-            {filtered.length === 0 ? (
-              <p className="py-4 text-center text-xs text-muted-foreground">No options</p>
-            ) : (
-              filtered.map((o, i) => (
-                <label key={i} className="flex cursor-pointer items-center gap-2.5 px-3 py-1.5 hover:bg-muted/40 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={isSelected(o)}
-                    onChange={() => toggle(o)}
-                    className="size-3.5 rounded accent-primary"
-                  />
-                  <span className="truncate">{getLabel(o)}</span>
-                </label>
-              ))
-            )}
-          </div>
-        </div>
-      )}
+      {dropdown}
     </div>
   );
 }
@@ -115,13 +165,9 @@ function MultiSelect({ label, options, selected, onChange, searchable = false, m
 function MaterialSelect({ materials, selected, onChange }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const ref = useRef(null);
-
-  useEffect(() => {
-    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', h);
-    return () => document.removeEventListener('mousedown', h);
-  }, []);
+  const [pos, setPos] = useState({ top: 0, left: 0, width: 280 });
+  const triggerRef = useRef(null);
+  const dropRef = useRef(null);
 
   const filtered = materials.filter(
     (m) =>
@@ -134,16 +180,89 @@ function MaterialSelect({ materials, selected, onChange }) {
     onChange(selected.includes(mat) ? selected.filter((s) => s !== mat) : [...selected, mat]);
   };
 
+  const updatePos = useCallback(() => {
+    if (!triggerRef.current) return;
+    const r = triggerRef.current.getBoundingClientRect();
+    setPos({ top: r.bottom + window.scrollY + 4, left: r.left + window.scrollX, width: Math.max(r.width, 280) });
+  }, []);
+
+  const handleOpen = () => { updatePos(); setOpen((p) => !p); };
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => {
+      if (
+        triggerRef.current && !triggerRef.current.contains(e.target) &&
+        dropRef.current    && !dropRef.current.contains(e.target)
+      ) setOpen(false);
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+
   const summary = selected.length === 0 ? 'All' : `${selected.length} selected`;
 
+  const dropdown = open ? createPortal(
+    <div
+      ref={dropRef}
+      style={{ position: 'absolute', top: pos.top, left: pos.left, width: pos.width, zIndex: 9999 }}
+      className="rounded-xl border border-border bg-background shadow-2xl overflow-hidden"
+    >
+      <div className="border-b border-border p-2">
+        <div className="relative">
+          <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <input
+            autoFocus
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search material code or description…"
+            className="h-8 w-full rounded-md border border-border bg-muted/30 pl-7 pr-3 text-xs outline-none focus:border-primary"
+          />
+        </div>
+      </div>
+      {selected.length > 0 && (
+        <div className="flex items-center justify-between border-b border-border/50 px-3 py-1">
+          <span className="text-xs text-muted-foreground">{selected.length} selected</span>
+          <button onClick={() => onChange([])} className="text-xs text-muted-foreground hover:text-foreground">Clear</button>
+        </div>
+      )}
+      <div className="max-h-64 overflow-y-auto">
+        {filtered.map((m) => (
+          <label key={m.material} className="flex cursor-pointer items-start gap-2.5 px-3 py-1.5 hover:bg-muted/40">
+            <input
+              type="checkbox"
+              checked={selected.includes(m.material)}
+              onChange={() => toggle(m.material)}
+              className="mt-0.5 size-3.5 rounded accent-primary"
+            />
+            <div className="min-w-0">
+              <p className="text-xs font-medium">{m.material}</p>
+              {m.desc && <p className="truncate text-[11px] text-muted-foreground">{m.desc}</p>}
+            </div>
+          </label>
+        ))}
+        {filtered.length === 0 && (
+          <p className="py-4 text-center text-xs text-muted-foreground">No materials found</p>
+        )}
+        {materials.filter((m) =>
+          !search || m.material.toLowerCase().includes(search.toLowerCase()) || (m.desc || '').toLowerCase().includes(search.toLowerCase())
+        ).length > 100 && (
+          <p className="py-2 text-center text-xs text-muted-foreground">Showing first 100 — refine search</p>
+        )}
+      </div>
+    </div>,
+    document.body
+  ) : null;
+
   return (
-    <div ref={ref} className="relative">
+    <div className="relative">
       <button
-        onClick={() => setOpen((p) => !p)}
+        ref={triggerRef}
+        onClick={handleOpen}
         className={cn(
           'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors min-w-[160px]',
           selected.length > 0
-            ? 'border-primary/60 bg-primary/8 text-primary font-medium'
+            ? 'border-primary/60 bg-primary/5 text-primary font-medium'
             : 'border-border bg-background text-foreground hover:bg-muted/50'
         )}
       >
@@ -155,55 +274,7 @@ function MaterialSelect({ materials, selected, onChange }) {
         )}
         <ChevronDown className={cn('size-3.5 shrink-0 transition-transform', open && 'rotate-180')} />
       </button>
-
-      {open && (
-        <div className="absolute left-0 top-full z-50 mt-1 w-72 rounded-xl border border-border bg-background shadow-lg">
-          <div className="border-b border-border p-2">
-            <div className="relative">
-              <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <input
-                autoFocus
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search material code or description…"
-                className="h-8 w-full rounded-md border border-border bg-muted/30 pl-7 pr-3 text-xs outline-none focus:border-primary"
-              />
-            </div>
-          </div>
-          {selected.length > 0 && (
-            <div className="flex items-center justify-between border-b border-border/50 px-3 py-1">
-              <span className="text-xs text-muted-foreground">{selected.length} selected</span>
-              <button onClick={() => onChange([])} className="text-xs text-muted-foreground hover:text-foreground">Clear</button>
-            </div>
-          )}
-          <div className="max-h-64 overflow-y-auto">
-            {filtered.map((m) => (
-              <label key={m.material} className="flex cursor-pointer items-start gap-2.5 px-3 py-1.5 hover:bg-muted/40">
-                <input
-                  type="checkbox"
-                  checked={selected.includes(m.material)}
-                  onChange={() => toggle(m.material)}
-                  className="mt-0.5 size-3.5 rounded accent-primary"
-                />
-                <div className="min-w-0">
-                  <p className="text-xs font-medium">{m.material}</p>
-                  {m.desc && <p className="truncate text-[11px] text-muted-foreground">{m.desc}</p>}
-                </div>
-              </label>
-            ))}
-            {filtered.length === 0 && (
-              <p className="py-4 text-center text-xs text-muted-foreground">No materials found</p>
-            )}
-            {materials.filter((m) =>
-              !search ||
-              m.material.toLowerCase().includes(search.toLowerCase()) ||
-              (m.desc || '').toLowerCase().includes(search.toLowerCase())
-            ).length > 100 && (
-              <p className="py-2 text-center text-xs text-muted-foreground">Showing first 100 — refine search</p>
-            )}
-          </div>
-        </div>
-      )}
+      {dropdown}
     </div>
   );
 }
@@ -225,16 +296,13 @@ export function CalendarDateSelect({ selected = [], onChange }) {
     setPos({ top: r.bottom + window.scrollY + 4, left: r.left + window.scrollX });
   }, []);
 
-  const handleOpen = () => {
-    updatePos();
-    setOpen((p) => !p);
-  };
+  const handleOpen = () => { updatePos(); setOpen((p) => !p); };
 
   useEffect(() => {
     if (!open) return;
     const h = (e) => {
       if (
-        btnRef.current && !btnRef.current.contains(e.target) &&
+        btnRef.current  && !btnRef.current.contains(e.target) &&
         dropRef.current && !dropRef.current.contains(e.target)
       ) setOpen(false);
     };
@@ -253,7 +321,7 @@ export function CalendarDateSelect({ selected = [], onChange }) {
 
   const pad = (n) => String(n).padStart(2, '0');
   const dateStr = (d) => `${year}-${pad(month + 1)}-${pad(d)}`;
-  const isSelected = (d) => selected.includes(dateStr(d));
+  const isDateSelected = (d) => selected.includes(dateStr(d));
 
   const toggle = (d) => {
     const s = dateStr(d);
@@ -277,7 +345,6 @@ export function CalendarDateSelect({ selected = [], onChange }) {
       style={{ position: 'absolute', top: pos.top, left: pos.left, zIndex: 9999 }}
       className="w-72 rounded-xl border border-border bg-background shadow-2xl p-3"
     >
-      {/* Month navigator */}
       <div className="flex items-center justify-between mb-2">
         <button onClick={prevMonth} className="rounded-lg p-1 hover:bg-muted/60 transition-colors">
           <ChevronLeft className="size-4" />
@@ -287,15 +354,11 @@ export function CalendarDateSelect({ selected = [], onChange }) {
           <ChevronRight className="size-4" />
         </button>
       </div>
-
-      {/* Day-of-week headers */}
       <div className="grid grid-cols-7 mb-1">
         {DAY_HEADERS.map((d) => (
           <span key={d} className="text-center text-[11px] font-semibold text-muted-foreground py-1">{d}</span>
         ))}
       </div>
-
-      {/* Day cells */}
       <div className="grid grid-cols-7 gap-0.5">
         {cells.map((day, i) =>
           day === null ? (
@@ -306,9 +369,7 @@ export function CalendarDateSelect({ selected = [], onChange }) {
               onClick={() => toggle(day)}
               className={cn(
                 'h-8 w-full rounded-md text-sm transition-colors',
-                isSelected(day)
-                  ? 'bg-primary text-primary-foreground font-semibold'
-                  : 'hover:bg-muted/60 text-foreground'
+                isDateSelected(day) ? 'bg-primary text-primary-foreground font-semibold' : 'hover:bg-muted/60 text-foreground'
               )}
             >
               {day}
@@ -316,13 +377,10 @@ export function CalendarDateSelect({ selected = [], onChange }) {
           )
         )}
       </div>
-
       {selected.length > 0 && (
         <div className="mt-2 flex items-center justify-between border-t border-border/50 pt-2">
           <span className="text-xs text-muted-foreground">{selected.length} date(s) selected</span>
-          <button onClick={() => onChange([])} className="text-xs text-muted-foreground hover:text-foreground">
-            Clear all
-          </button>
+          <button onClick={() => onChange([])} className="text-xs text-muted-foreground hover:text-foreground">Clear all</button>
         </div>
       )}
     </div>,
@@ -337,7 +395,7 @@ export function CalendarDateSelect({ selected = [], onChange }) {
         className={cn(
           'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors min-w-[140px]',
           selected.length > 0
-            ? 'border-primary/60 bg-primary/8 text-primary font-medium'
+            ? 'border-primary/60 bg-primary/5 text-primary font-medium'
             : 'border-border bg-background text-foreground hover:bg-muted/50'
         )}
       >
@@ -361,13 +419,13 @@ function FilterChips({ filters, onChange }) {
     items.forEach((v) =>
       chips.push({ key, label: v, remove: () => setter(items.filter((i) => i !== v)) })
     );
-  add('years',      filters.years,      (v) => onChange('years', v));
-  add('months',     filters.months,     (v) => onChange('months', v));
-  add('products',   filters.products,   (v) => onChange('products', v));
-  add('locations',  filters.locations,  (v) => onChange('locations', v));
-  add('materials',  filters.materials,  (v) => onChange('materials', v));
-  add('dates', filters.dates, (v) => onChange('dates', v));
-  add('days',  filters.days,  (v) => onChange('days', v));
+  add('years',     filters.years,     (v) => onChange('years', v));
+  add('months',    filters.months,    (v) => onChange('months', v));
+  add('products',  filters.products,  (v) => onChange('products', v));
+  add('locations', filters.locations, (v) => onChange('locations', v));
+  add('materials', filters.materials, (v) => onChange('materials', v));
+  add('dates',     filters.dates,     (v) => onChange('dates', v));
+  add('days',      filters.days,      (v) => onChange('days', v));
   if (!chips.length) return null;
   return (
     <div className="flex flex-wrap gap-1.5 mt-2">
@@ -396,7 +454,7 @@ export function GlobalFilters({ filters, onChange, options = {}, compact = false
 
   const set = (key, val) => onChange({ ...filters, [key]: val });
 
-  const yearOpts = years.map(String);
+  const yearOpts  = years.map(String);
   const monthOpts = months.map((m) => ({ value: String(m.index), label: m.name }));
 
   return (
@@ -464,8 +522,9 @@ export function GlobalFilters({ filters, onChange, options = {}, compact = false
           selected={filters.dates || []}
           onChange={(v) => set('dates', v)}
         />
+        {/* Days / Age Bucket filter — uses correct labels matching backend bucketToSql() */}
         <MultiSelect
-          label="Days"
+          label="Age Bucket"
           options={DAYS_OPTIONS}
           selected={filters.days || []}
           onChange={(v) => set('days', v)}
