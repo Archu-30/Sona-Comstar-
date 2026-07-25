@@ -5,7 +5,7 @@ import { History, Trash2, FileText, FileSpreadsheet, Table2, RefreshCw, Filter, 
 import { toast } from 'sonner';
 import { PageHeader } from '../components/shared/PageHeader';
 
-const API = 'http://localhost:5000';
+const API = '';
 
 const FORMAT_ICON = {
   pdf:  { icon: FileText,        color: 'text-rose-600',    bg: 'bg-rose-50 dark:bg-rose-950/30' },

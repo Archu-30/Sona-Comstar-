@@ -41,11 +41,18 @@ export function MultiSelect({ label, options = [], selected = [], onChange, sear
     ? opts.filter((o) => o.label.toLowerCase().includes(search.toLowerCase()))
     : opts;
 
-  const isSelected = (value) => selected.includes(value);
+  const isSelected = (value) => selected.map(String).includes(String(value));
 
   const toggle = (value) => {
-    if (isSelected(value)) onChange(selected.filter((v) => v !== value));
-    else onChange([...selected, value]);
+    const valStr = String(value);
+    const selectedStrs = selected.map(String);
+    if (selectedStrs.includes(valStr)) {
+      onChange(selected.filter((v) => String(v) !== valStr));
+    } else {
+      // Find the matched option to keep original type
+      const opt = opts.find((o) => String(o.value) === valStr);
+      onChange([...selected, opt ? opt.value : value]);
+    }
   };
 
   const selectAll = () => onChange(opts.map((o) => o.value));
@@ -93,7 +100,7 @@ export function MultiSelect({ label, options = [], selected = [], onChange, sear
   const summary = noneSelected
     ? 'All'
     : selected.length === 1
-      ? (opts.find((o) => o.value === selected[0])?.label ?? selected[0])
+      ? (opts.find((o) => String(o.value) === String(selected[0]))?.label ?? selected[0])
       : `${selected.length} selected`;
 
   const dropdown = open ? createPortal(
@@ -152,8 +159,9 @@ export function MultiSelect({ label, options = [], selected = [], onChange, sear
           <p className="py-4 text-center text-xs text-muted-foreground">No options match</p>
         ) : (
           filtered.map((o) => (
-            <label
+            <div
               key={o.value}
+              onClick={() => toggle(o.value)}
               className={cn(
                 'flex cursor-pointer items-center gap-2.5 px-3 py-1.5 hover:bg-muted/50 transition-colors text-sm',
                 isSelected(o.value) && 'bg-primary/5'
@@ -169,8 +177,8 @@ export function MultiSelect({ label, options = [], selected = [], onChange, sear
               >
                 {isSelected(o.value) && <Check className="size-3" />}
               </span>
-              <span className="truncate flex-1">{o.label}</span>
-            </label>
+              <span className="truncate flex-1 select-none">{o.label}</span>
+            </div>
           ))
         )}
       </div>

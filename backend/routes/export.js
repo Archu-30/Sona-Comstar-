@@ -5,10 +5,12 @@
  * GET /api/export?module=complete&format=xlsx&years=["2026"]&months=["5"]...
  * GET /api/export?module=storage-ageing&format=xlsx
  * GET /api/export?module=dashboard&format=xlsx
- * GET /api/export?format=pdf   → returns JSON payload for client-side PDF
+ * GET /api/export?format=pdf-data → returns JSON payload for client-side PDF
  *
- * FIX: Was POST-only; frontend called GET → caused 404.
- *      Now handles GET (primary) + POST (backward-compat).
+ * FIX 1: Was POST-only; frontend called GET → caused 404.
+ *         Now handles GET (primary) + POST (backward-compat).
+ * FIX 2: pool.execute(sql, []) hangs in mysql2 when binds is empty.
+ *         Use pool.query(sql) when there are no bind params.
  */
 const express = require('express');
 const router = express.Router();
@@ -21,6 +23,16 @@ const {
 
 const { isAvailable, getPool } = require('../db/connection');
 
+// ─── Safe query helper (avoids mysql2 prepared-stmt hang with empty binds) ────
+async function db(pool, sql, binds = []) {
+  if (!binds || binds.length === 0) {
+    const [rows] = await pool.query(sql);
+    return [rows];
+  }
+  const [rows] = await pool.execute(sql, binds);
+  return [rows];
+}
+
 // ─── Parse query params ───────────────────────────────────────────────────────
 function parseArr(v) {
   if (!v) return [];
@@ -31,13 +43,17 @@ function parseArr(v) {
 
 function extractFilters(query) {
   return {
-    years:     parseArr(query.years),
-    months:    parseArr(query.months),
-    products:  parseArr(query.products),
-    locations: parseArr(query.locations),
-    materials: parseArr(query.materials),
-    days:      parseArr(query.days),
-    dates:     parseArr(query.dates),
+    years:       parseArr(query.years),
+    months:      parseArr(query.months),
+    products:    parseArr(query.products),
+    locations:   parseArr(query.locations),
+    materials:   parseArr(query.materials),
+    days:        parseArr(query.days),
+    dates:       parseArr(query.dates),
+    dayDates:    parseArr(query.dayDates),
+    reportYear:  query.reportYear  ? Number(query.reportYear)  : null,
+    reportMonth: query.reportMonth ? Number(query.reportMonth) : null,
+    reportDates: parseArr(query.reportDates),
   };
 }
 
@@ -46,7 +62,15 @@ function buildWhere(filters) {
   const conds = [];
   const binds = [];
 
-  const { years, months, products, locations, materials, days, dates } = filters;
+  const { years, months, products, locations, materials, days, dates, dayDates,
+          reportYear, reportMonth, reportDates } = filters;
+
+  if (reportYear)            { conds.push('report_year = ?');  binds.push(reportYear); }
+  if (reportMonth)           { conds.push('report_month = ?'); binds.push(reportMonth); }
+  if (reportDates && reportDates.length) {
+    conds.push(`report_date IN (${reportDates.map(() => '?').join(',')})`);
+    binds.push(...reportDates);
+  }
 
   if (products.length)   { conds.push(`product_type IN (${products.map(() => '?').join()})`);  binds.push(...products); }
   if (locations.length)  { conds.push(`storage_location IN (${locations.map(() => '?').join()})`); binds.push(...locations); }
@@ -54,6 +78,7 @@ function buildWhere(filters) {
   if (years.length)      { conds.push(`gr_year IN (${years.map(() => '?').join()})`);          binds.push(...years.map(Number)); }
   if (months.length)     { conds.push(`gr_month IN (${months.map(() => '?').join()})`);        binds.push(...months.map(Number)); }
   if (dates.length)      { conds.push(`DATE(gr_date) IN (${dates.map(() => '?').join(',')})`); binds.push(...dates); }
+  if (dayDates?.length)  { conds.push(`DAY(gr_date) IN (${dayDates.map(() => '?').join(',')})`); binds.push(...dayDates.map(Number)); }
 
   // Days filter uses proper bucket labels (0-30 Days, 31-60 Days, etc.)
   if (days.length) {
@@ -92,7 +117,12 @@ function buildWhere(filters) {
   };
 }
 
+// aging_days = -1 means unknown/invalid (Excel date serial stored as days).
+// All age-based SQL excludes these items so they don't corrupt averages or buckets.
+const VALID_AGE = 'aging_days >= 0 AND aging_days <= 9999';
+
 const AGE_CASE = `CASE
+  WHEN aging_days < 0 OR aging_days > 9999 THEN 'Unknown'
   WHEN aging_days BETWEEN 0 AND 30   THEN '0-30 Days'
   WHEN aging_days BETWEEN 31 AND 60  THEN '31-60 Days'
   WHEN aging_days BETWEEN 61 AND 90  THEN '61-90 Days'
@@ -115,7 +145,7 @@ const BUCKET_SUMS = `
   SUM(CASE WHEN aging_days BETWEEN 731 AND 1095 THEN total_value ELSE 0 END) AS b_2yr,
   SUM(CASE WHEN aging_days BETWEEN 1096 AND 1460 THEN total_value ELSE 0 END) AS b_3yr,
   SUM(CASE WHEN aging_days BETWEEN 1461 AND 1825 THEN total_value ELSE 0 END) AS b_4yr,
-  SUM(CASE WHEN aging_days > 1825 THEN total_value ELSE 0 END) AS b_5yr
+  SUM(CASE WHEN aging_days > 1825 AND aging_days <= 9999 THEN total_value ELSE 0 END) AS b_5yr
 `;
 
 // ─── MySQL data fetchers ──────────────────────────────────────────────────────
@@ -123,28 +153,28 @@ const BUCKET_SUMS = `
 async function fetchDashboardData(pool, filters) {
   const { where, binds } = buildWhere(filters);
 
-  const [[ageing]] = await pool.execute(`
+  const [[ageing]] = await db(pool, `
     SELECT COUNT(*) AS total_items, ROUND(SUM(total_value),2) AS total_value,
-      ROUND(AVG(aging_days)) AS avg_age,
-      ROUND(SUM(CASE WHEN aging_days > 180 THEN total_value ELSE 0 END),2) AS dead_stock_value,
+      ROUND(AVG(CASE WHEN ${VALID_AGE} THEN aging_days END)) AS avg_age,
+      ROUND(SUM(CASE WHEN aging_days BETWEEN 181 AND 9999 THEN total_value ELSE 0 END),2) AS dead_stock_value,
       COUNT(DISTINCT material) AS material_count,
       COUNT(DISTINCT storage_location) AS location_count
     FROM inventory_items ${where}
   `, binds);
 
-  const [byProduct] = await pool.execute(`
+  const [byProduct] = await db(pool, `
     SELECT COALESCE(NULLIF(product_type,''),'UNASSIGNED') AS product_type,
       ROUND(SUM(total_value),2) AS total_value, COUNT(*) AS cnt
     FROM inventory_items ${where} GROUP BY product_type ORDER BY total_value DESC
   `, binds);
 
-  const [byLocation] = await pool.execute(`
+  const [byLocation] = await db(pool, `
     SELECT storage_location, ROUND(SUM(total_value),2) AS total_value,
       ROUND(AVG(aging_days)) AS avg_age
     FROM inventory_items ${where} GROUP BY storage_location ORDER BY total_value DESC LIMIT 20
   `, binds);
 
-  const [byBucket] = await pool.execute(`
+  const [byBucket] = await db(pool, `
     SELECT ${AGE_CASE} AS bucket, COUNT(*) AS cnt, ROUND(SUM(total_value),2) AS total_value
     FROM inventory_items ${where} GROUP BY bucket ORDER BY MIN(aging_days)
   `, binds);
@@ -155,17 +185,17 @@ async function fetchDashboardData(pool, filters) {
 async function fetchAgeingData(pool, filters) {
   const { where, binds } = buildWhere(filters);
 
-  const [matrix] = await pool.execute(`
+  const [matrix] = await db(pool, `
     SELECT storage_location, product_type, ${BUCKET_SUMS},
       SUM(total_value) AS total_value, COUNT(*) AS item_count, ROUND(AVG(aging_days)) AS avg_age
     FROM inventory_items ${where}
     GROUP BY storage_location, product_type ORDER BY storage_location, product_type
   `, binds);
 
-  const [[kpis]] = await pool.execute(`
+  const [[kpis]] = await db(pool, `
     SELECT COUNT(*) AS total_items, ROUND(SUM(total_value),2) AS total_value,
-      ROUND(AVG(aging_days)) AS avg_age,
-      ROUND(SUM(CASE WHEN aging_days > 180 THEN total_value ELSE 0 END),2) AS dead_stock_value,
+      ROUND(AVG(CASE WHEN ${VALID_AGE} THEN aging_days END)) AS avg_age,
+      ROUND(SUM(CASE WHEN aging_days BETWEEN 181 AND 9999 THEN total_value ELSE 0 END),2) AS dead_stock_value,
       ROUND(SUM(CASE WHEN aging_days BETWEEN 91 AND 180 THEN total_value ELSE 0 END),2) AS slow_moving_value,
       COUNT(DISTINCT storage_location) AS location_count,
       COUNT(DISTINCT product_type) AS product_count,
@@ -173,13 +203,13 @@ async function fetchAgeingData(pool, filters) {
     FROM inventory_items ${where}
   `, binds);
 
-  const [byProduct] = await pool.execute(`
+  const [byProduct] = await db(pool, `
     SELECT COALESCE(product_type,'UNASSIGNED') AS product_type,
       ROUND(SUM(total_value),2) AS total_value, COUNT(*) AS cnt
     FROM inventory_items ${where} GROUP BY product_type ORDER BY total_value DESC
   `, binds);
 
-  const [byBucket] = await pool.execute(`
+  const [byBucket] = await db(pool, `
     SELECT ${AGE_CASE} AS bucket, COUNT(*) AS cnt, ROUND(SUM(total_value),2) AS total_value
     FROM inventory_items ${where} GROUP BY bucket ORDER BY MIN(aging_days)
   `, binds);
@@ -190,7 +220,7 @@ async function fetchAgeingData(pool, filters) {
 async function fetchProductData(pool, filters) {
   const { where, binds } = buildWhere(filters);
 
-  const [rows] = await pool.execute(`
+  const [rows] = await db(pool, `
     SELECT COALESCE(NULLIF(product_type,''),'UNASSIGNED PRODUCT') AS product_type,
       ${BUCKET_SUMS},
       ROUND(SUM(total_value),2) AS total_value,
@@ -201,7 +231,7 @@ async function fetchProductData(pool, filters) {
     GROUP BY product_type ORDER BY total_value DESC
   `, binds);
 
-  const [[totals]] = await pool.execute(
+  const [[totals]] = await db(pool,
     `SELECT ROUND(SUM(total_value),2) AS grand_total FROM inventory_items ${where}`,
     binds
   );
@@ -212,11 +242,17 @@ async function fetchProductData(pool, filters) {
 async function fetchClosingData(pool, filters) {
   const conds = [];
   const binds = [];
+  if (filters.reportYear)            { conds.push('report_year = ?');  binds.push(filters.reportYear); }
+  if (filters.reportMonth)           { conds.push('report_month = ?'); binds.push(filters.reportMonth); }
+  if (filters.reportDates && filters.reportDates.length) {
+    conds.push(`report_date IN (${filters.reportDates.map(() => '?').join(',')})`);
+    binds.push(...filters.reportDates);
+  }
   if (filters.years.length)  { conds.push(`period_year IN (${filters.years.map(() => '?').join()})`);  binds.push(...filters.years.map(Number)); }
   if (filters.months.length) { conds.push(`period_month IN (${filters.months.map(() => '?').join()})`); binds.push(...filters.months.map(Number)); }
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
-  const [periods] = await pool.execute(`
+  const [periods] = await db(pool, `
     SELECT period_name, period_month, period_year,
       ROUND(SUM(total_value),2) AS total_value,
       ROUND(SUM(total_stock),3) AS total_stock,
@@ -226,7 +262,7 @@ async function fetchClosingData(pool, filters) {
     ORDER BY period_year, period_month
   `, binds);
 
-  const [byType] = await pool.execute(`
+  const [byType] = await db(pool, `
     SELECT item_type, ROUND(SUM(total_value),2) AS total_value, COUNT(DISTINCT material) AS cnt
     FROM closing_inventory ${where} GROUP BY item_type ORDER BY total_value DESC
   `, binds);
@@ -234,16 +270,44 @@ async function fetchClosingData(pool, filters) {
   return { periods, byType };
 }
 
-async function fetchGitData(pool) {
-  const [[kpis]] = await pool.execute(`
+async function fetchGitData(pool, filters = {}) {
+  const conds = [];
+  const binds = [];
+  const { years = [], months = [], products = [], dayDates = [],
+          reportYear = null, reportMonth = null, reportDates = [] } = filters;
+
+  if (reportYear)            { conds.push('report_year = ?');  binds.push(reportYear); }
+  if (reportMonth)           { conds.push('report_month = ?'); binds.push(reportMonth); }
+  if (reportDates.length)    { conds.push(`report_date IN (${reportDates.map(() => '?').join(',')})`); binds.push(...reportDates); }
+
+  if (products.length) {
+    conds.push(`product IN (${products.map(() => '?').join()})`);
+    binds.push(...products);
+  }
+  if (years.length) {
+    conds.push(`YEAR(invoice_date) IN (${years.map(() => '?').join()})`);
+    binds.push(...years.map(Number));
+  }
+  if (months.length) {
+    conds.push(`MONTH(invoice_date) IN (${months.map(() => '?').join()})`);
+    binds.push(...months.map(Number));
+  }
+  if (dayDates.length) {
+    conds.push(`DAY(invoice_date) IN (${dayDates.map(() => '?').join()})`);
+    binds.push(...dayDates.map(Number));
+  }
+
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+  const [[kpis]] = await db(pool, `
     SELECT COUNT(*) AS item_count, ROUND(SUM(value_inr),2) AS total_value,
       COUNT(DISTINCT vendor_code) AS vendor_count,
       SUM(CASE WHEN aging_days > 90 THEN 1 ELSE 0 END) AS critical_count,
       ROUND(AVG(aging_days)) AS avg_age
-    FROM git_items
-  `);
+    FROM git_items ${where}
+  `, binds);
 
-  const [byBucket] = await pool.execute(`
+  const [byBucket] = await db(pool, `
     SELECT CASE
       WHEN aging_days BETWEEN 0 AND 30   THEN '0-30 Days'
       WHEN aging_days BETWEEN 31 AND 60  THEN '31-60 Days'
@@ -253,25 +317,25 @@ async function fetchGitData(pool) {
       ELSE 'Above 1 Year'
     END AS bucket,
     COUNT(*) AS cnt, ROUND(SUM(value_inr),2) AS total_value
-    FROM git_items GROUP BY bucket ORDER BY MIN(aging_days)
-  `);
+    FROM git_items ${where} GROUP BY bucket ORDER BY MIN(aging_days)
+  `, binds);
 
-  const [byProduct] = await pool.execute(`
+  const [byProduct] = await db(pool, `
     SELECT product, ROUND(SUM(value_inr),2) AS total_value, COUNT(*) AS cnt
-    FROM git_items WHERE product IS NOT NULL GROUP BY product ORDER BY total_value DESC
-  `);
+    FROM git_items ${where} GROUP BY product ORDER BY total_value DESC
+  `, binds);
 
-  const [byVendor] = await pool.execute(`
+  const [byVendor] = await db(pool, `
     SELECT vendor_code, ROUND(SUM(value_inr),2) AS total_value, COUNT(*) AS cnt
-    FROM git_items GROUP BY vendor_code ORDER BY total_value DESC LIMIT 15
-  `);
+    FROM git_items ${where} GROUP BY vendor_code ORDER BY total_value DESC LIMIT 15
+  `, binds);
 
   return { kpis, byBucket, byProduct, byVendor };
 }
 
 async function fetchTrendData(pool, filters) {
   const { where, binds } = buildWhere(filters);
-  const [rows] = await pool.execute(`
+  const [rows] = await db(pool, `
     SELECT gr_year AS yr, gr_month AS mo,
       ROUND(SUM(total_value),2) AS total_value,
       ROUND(SUM(quantity),0) AS total_qty,
@@ -286,12 +350,15 @@ async function fetchTrendData(pool, filters) {
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 async function handleExport(req, res) {
+  console.log('[EXPORT] Request received:', req.method, req.url);
   try {
     const params = { ...req.query, ...req.body };
     const { module = 'complete', format = 'xlsx' } = params;
     const filters = extractFilters(params);
+    console.log('[EXPORT] Parsed params:', { module, format, filters });
 
     if (!['xlsx', 'pdf-data', 'csv'].includes(format)) {
+      console.log('[EXPORT] Invalid format:', format);
       return res.status(400).json({ error: 'format must be xlsx, pdf-data, or csv' });
     }
 
@@ -306,14 +373,14 @@ async function handleExport(req, res) {
         fetchAgeingData(pool, filters),
         fetchProductData(pool, filters),
         fetchClosingData(pool, filters),
-        fetchGitData(pool),
+        fetchGitData(pool, filters),
         fetchTrendData(pool, filters),
       ]);
       return res.json({ dashboardData, ageingData, productData, closingData, gitData, trendData, filters });
     }
 
-    // ── Excel export ──
-    if (format === 'xlsx') {
+    // ── Excel or CSV export ──
+    if (format === 'xlsx' || format === 'csv') {
       let wb;
 
       if (isAvailable()) {
@@ -321,28 +388,38 @@ async function handleExport(req, res) {
         const pool = getPool();
 
         if (module === 'complete') {
+          if (format === 'csv') {
+            return res.status(400).json({ error: 'Complete report cannot be exported as CSV. Please use Excel format.' });
+          }
+          console.log('[EXPORT] Fetching complete data...');
           const [dashboardData, ageingData, productData, closingData, gitData, trendData] = await Promise.all([
             fetchDashboardData(pool, filters),
             fetchAgeingData(pool, filters),
             fetchProductData(pool, filters),
             fetchClosingData(pool, filters),
-            fetchGitData(pool),
+            fetchGitData(pool, filters),
             fetchTrendData(pool, filters),
           ]);
+          console.log('[EXPORT] Fetched complete data. Building workbook...');
           wb = await buildCompleteWorkbook({ dashboardData, ageingData, productData, closingData, gitData, trendData }, filters);
+          console.log('[EXPORT] Workbook built.');
         } else {
           // Single module
+          console.log(`[EXPORT] Fetching single module data: ${module}...`);
           let data;
           switch (module) {
             case 'dashboard':          data = await fetchDashboardData(pool, filters);  break;
             case 'closing-inventory':  data = await fetchClosingData(pool, filters);    break;
             case 'storage-ageing':     data = await fetchAgeingData(pool, filters);     break;
             case 'product-ageing':     data = await fetchProductData(pool, filters);    break;
-            case 'git':                data = await fetchGitData(pool);                 break;
+            case 'git':                data = await fetchGitData(pool, filters);        break;
             default:
+              console.log('[EXPORT] Unknown module:', module);
               return res.status(400).json({ error: `Unknown module: ${module}` });
           }
+          console.log('[EXPORT] Fetched data. Building workbook...');
           wb = await buildSingleWorkbook(module, data, filters);
+          console.log('[EXPORT] Workbook built.');
         }
       } else {
         // No MySQL — build empty workbook with notice
@@ -354,22 +431,35 @@ async function handleExport(req, res) {
         ws.getColumn(1).width = 60;
       }
 
-      const buffer = await wb.xlsx.writeBuffer();
-      const prefix = module === 'complete' ? 'Complete_Report' : module.replace(/-/g, '_');
-      const filename = exportFilename(prefix, 'xlsx');
+      if (format === 'xlsx') {
+        console.log('[EXPORT] Writing xlsx buffer...');
+        const buffer = await wb.xlsx.writeBuffer();
+        console.log(`[EXPORT] Buffer written: ${buffer.length} bytes`);
+        const prefix = module === 'complete' ? 'Complete_Report' : module.replace(/-/g, '_');
+        const filename = exportFilename(prefix, 'xlsx');
 
-      res.set({
-        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'Content-Disposition': `attachment; filename="${filename}"`,
-        'Content-Length': String(buffer.length),
-        'Cache-Control': 'no-cache',
-      });
-      return res.send(Buffer.from(buffer));
-    }
+        res.set({
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          'Content-Length': String(buffer.length),
+          'Cache-Control': 'no-cache',
+        });
+        return res.send(Buffer.from(buffer));
+      } else {
+        console.log('[EXPORT] Writing csv buffer...');
+        const buffer = await wb.csv.writeBuffer();
+        console.log(`[EXPORT] Buffer written: ${buffer.length} bytes`);
+        const prefix = module.replace(/-/g, '_');
+        const filename = exportFilename(prefix, 'csv');
 
-    // ── CSV (simple fallback) ──
-    if (format === 'csv') {
-      return res.status(400).json({ error: 'For CSV, use module-specific routes. Use format=xlsx for full export.' });
+        res.set({
+          'Content-Type': 'text/csv',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          'Content-Length': String(buffer.length),
+          'Cache-Control': 'no-cache',
+        });
+        return res.send(Buffer.from(buffer));
+      }
     }
 
     return res.status(400).json({ error: 'Unsupported format' });

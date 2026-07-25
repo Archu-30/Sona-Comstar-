@@ -304,9 +304,14 @@ function generateExecutiveSummary(wb, allData, filters) {
 
   const { dashboardData, ageingData, gitData, closingData } = allData;
 
+  // Total Inventory Value comes from closing inventory (latest period), not ageing sum
+  const latestClosingPeriod = closingData?.periods?.length
+    ? closingData.periods[closingData.periods.length - 1]
+    : null;
+
   const kpis = {};
   if (dashboardData?.ageing) {
-    kpis['Total Inventory Value']     = Number(dashboardData.ageing.total_value) || 0;
+    kpis['Total Inventory Value']     = Number(latestClosingPeriod?.total_value) || Number(dashboardData.ageing.total_value) || 0;
     kpis['Total Inventory Items']     = Number(dashboardData.ageing.total_items) || 0;
     kpis['Unique Materials']          = Number(dashboardData.ageing.material_count) || 0;
     kpis['Storage Locations']         = Number(dashboardData.ageing.location_count) || 0;
@@ -355,7 +360,7 @@ function generateExecutiveSummary(wb, allData, filters) {
 /**
  * Build the Dashboard sheet.
  */
-function generateDashboard(wb, data, filters) {
+function generateDashboard(wb, data, filters, closingData) {
   const ws = wb.addWorksheet('2. Dashboard');
   const colSpan = 8;
   let row = writeHeader(ws, 'DASHBOARD SUMMARY', 'Real-time inventory analytics overview', colSpan, filters);
@@ -364,9 +369,14 @@ function generateDashboard(wb, data, filters) {
 
   const { ageing, byProduct = [], byLocation = [], byBucket = [] } = data;
 
+  // Use closing inventory total for the headline value (matches dashboard)
+  const latestClosingPeriod = closingData?.periods?.length
+    ? closingData.periods[closingData.periods.length - 1]
+    : null;
+
   if (ageing) {
     row = writeKPIs(ws, {
-      'Total Inventory Value':   Number(ageing.total_value) || 0,
+      'Total Inventory Value':   Number(latestClosingPeriod?.total_value) || Number(ageing.total_value) || 0,
       'Total Items':             Number(ageing.total_items) || 0,
       'Unique Materials':        Number(ageing.material_count) || 0,
       'Storage Locations':       Number(ageing.location_count) || 0,
@@ -743,7 +753,7 @@ function generateTrendAnalysis(wb, trendData, filters) {
  * that users can chart themselves, plus descriptive headers.
  */
 function generateChartsDashboard(wb, allData, filters) {
-  const ws = wb.addWorksheet('9. Charts Dashboard');
+  const ws = wb.addWorksheet('7. Charts Dashboard');
   const colSpan = 6;
   let row = writeHeader(ws, 'CHARTS DATA DASHBOARD', 'Data tables for all chart types — use Insert → Chart in Excel', colSpan, filters);
 
@@ -801,7 +811,7 @@ function generateChartsDashboard(wb, allData, filters) {
  * Build the Validation Summary sheet.
  */
 function generateValidationSummary(wb, allData, filters) {
-  const ws = wb.addWorksheet('10. Validation Summary');
+  const ws = wb.addWorksheet('8. Validation Summary');
   const colSpan = 5;
   let row = writeHeader(ws, 'VALIDATION SUMMARY', 'Data integrity and completeness checks', colSpan, filters);
 
@@ -880,15 +890,11 @@ async function buildCompleteWorkbook(allData, filters) {
   wb.modified = new Date();
 
   generateExecutiveSummary(wb, allData, filters);
-  generateDashboard(wb, allData.dashboardData, filters);
+  generateDashboard(wb, allData.dashboardData, filters, allData.closingData);
   generateClosingInventory(wb, allData.closingData, filters);
   generateStorageAgeing(wb, allData.ageingData, filters);
   generateProductAnalytics(wb, allData.productData, filters);
   generateGIT(wb, allData.gitData, filters);
-  generateMonthlyComparison(wb, allData.closingData, filters);
-  generateTrendAnalysis(wb, allData.trendData, filters);
-  generateChartsDashboard(wb, allData, filters);
-  generateValidationSummary(wb, allData, filters);
 
   return wb;
 }

@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import * as echarts from 'echarts/core';
@@ -58,7 +58,62 @@ const PIE_COLORS = [
 ];
 
 export default function StorageAgeingPage() {
-  const { data: summary, isLoading, isError, error } = useDashboardSummary();
+  const [selectedYears, setSelectedYears] = useState([]);
+  const [selectedMonths, setSelectedMonths] = useState([]);
+  const [selectedDates, setSelectedDates] = useState([]);
+  const [selectedLocations, setSelectedLocations] = useState([]);
+  const [selectedProducts, setSelectedProducts] = useState([]);
+  const [selectedValueCols, setSelectedValueCols] = useState([]);
+  const [selectedBuckets, setSelectedBuckets] = useState([]);
+
+  const MONTH_NAMES_FULL = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+
+  const yearQuery = selectedYears.length === 1 ? selectedYears[0] : '';
+  const monthName = selectedMonths.length === 1 ? selectedMonths[0] : '';
+  const monthQuery = monthName ? String(MONTH_NAMES_FULL.indexOf(monthName) + 1) : '';
+  const datesQuery = selectedDates.length > 0 ? selectedDates : [];
+
+  const { data: summary, isLoading, isError, error } = useDashboardSummary({
+    year: yearQuery,
+    month: monthQuery,
+    dates: datesQuery,
+  });
+
+  const maxDays = useMemo(() => {
+    const years = selectedYears.length > 0 ? selectedYears.map(Number) : [new Date().getFullYear()];
+    const months = selectedMonths.length > 0 ? selectedMonths.map(m => MONTH_NAMES_FULL.indexOf(m)) : Array.from({length: 12}, (_, i) => i);
+    
+    let max = 31;
+    if (selectedMonths.length > 0) {
+      max = 0;
+      for (const y of years) {
+        for (const m of months) {
+          if (m >= 0 && m < 12) {
+            const days = new Date(y, m + 1, 0).getDate();
+            if (days > max) max = days;
+          }
+        }
+      }
+    }
+    return max;
+  }, [selectedYears, selectedMonths]);
+
+  const dateOptions = useMemo(() => {
+    return Array.from({ length: maxDays }, (_, i) => String(i + 1));
+  }, [maxDays]);
+
+  useEffect(() => {
+    if (selectedDates.length > 0) {
+      const validDates = selectedDates.filter(d => Number(d) <= maxDays);
+      if (validDates.length !== selectedDates.length) {
+        setSelectedDates(validDates);
+      }
+    }
+  }, [maxDays, selectedDates]);
+
   const { data: filterOptions = {} } = useFilterOptions();
   const gf = useFilterStore();
 
@@ -66,16 +121,19 @@ export default function StorageAgeingPage() {
 
   const handleExport = useCallback(
     (format) => {
-      exportMutation.mutate({ module: 'ageing', format });
+      exportMutation.mutate({
+        module: 'ageing',
+        format,
+        years: selectedYears,
+        months: selectedMonths.map(m => MONTH_NAMES_FULL.indexOf(m) + 1),
+        locations: selectedLocations,
+        products: selectedProducts,
+        days: selectedBuckets,
+        dayDates: selectedDates,
+      });
     },
-    [exportMutation]
+    [exportMutation, selectedYears, selectedMonths, selectedLocations, selectedProducts, selectedBuckets, selectedDates]
   );
-
-  const [selectedYears, setSelectedYears] = useState([]);
-  const [selectedMonths, setSelectedMonths] = useState([]);
-  const [selectedLocations, setSelectedLocations] = useState([]);
-  const [selectedProducts, setSelectedProducts] = useState([]);
-  const [selectedValueCols, setSelectedValueCols] = useState([]);
 
   const ageingBuckets = summary?.ageing?.buckets ?? [];
   const matrix = summary?.ageing?.storageAgeingMatrix ?? [];
@@ -103,11 +161,12 @@ export default function StorageAgeingPage() {
     return (r) => selectedValueCols.reduce((s, c) => s + (r[c] || 0), 0);
   }, [selectedValueCols]);
 
-  // Aggregate matrix rows by location applying product/value-column filters
+  // Aggregate matrix rows by location applying product/value-column/bucket filters
   const allStorageDetailed = useMemo(() => {
     const locMap = new Map();
     for (const r of matrix) {
       if (selectedProducts.length > 0 && !selectedProducts.includes(r.productType)) continue;
+      if (selectedBuckets.length > 0 && !selectedBuckets.includes(r.bucket)) continue;
       let e = locMap.get(r.storageLocation);
       if (!e) {
         e = { storageLocation: r.storageLocation, totalValue: 0, totalQuantity: 0, bucketMap: new Map() };
@@ -130,7 +189,7 @@ export default function StorageAgeingPage() {
         buckets: STORAGE_AGE_BUCKETS.map((b) => e.bucketMap.get(b) ?? { bucket: b, count: 0, totalValue: 0, totalQuantity: 0 }),
       }))
       .sort((a, b) => a.storageLocation.localeCompare(b.storageLocation));
-  }, [matrix, selectedProducts, rowValue]);
+  }, [matrix, selectedProducts, selectedBuckets, rowValue]);
 
   const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const grTrendMatrix = summary?.ageing?.grTrendMatrix ?? [];
@@ -187,14 +246,9 @@ export default function StorageAgeingPage() {
     }
     return null;
   }, [grTrendMatrix, selectedLocations, selectedProducts, selectedValueCols, rowValue]);
-  const grYearOptions = useMemo(
-    () => [...new Set(grTrend.map((d) => d.month.split('-')[0]))].sort(),
-    [grTrend]
-  );
-  const grMonthOptions = useMemo(
-    () => [...new Set(grTrend.map((d) => MONTH_NAMES[Number(d.month.split('-')[1]) - 1]))],
-    [grTrend]
-  );
+
+  const grYearOptions = useMemo(() => filterOptions.years?.map(String) || [], [filterOptions]);
+  const grMonthOptions = useMemo(() => filterOptions.months?.map((m) => m.name) || [], [filterOptions]);
 
   const storageDetailed = useMemo(() => {
     if (selectedLocations.length === 0) return allStorageDetailed;
@@ -367,41 +421,15 @@ export default function StorageAgeingPage() {
         }
       />
 
-      {/* Global Filters */}
-      <GlobalFilters
-        filters={gf}
-        onChange={(f) => gf.setFilters(f)}
-        options={filterOptions}
-      />
-
-      {/* Chart-specific Filters */}
-      <div className="flex flex-wrap gap-3 items-end rounded-xl border border-border/50 bg-card p-4">
+      {/* Filters */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-4 rounded-xl border border-border/50 bg-card p-4 items-end">
         <MultiSelect label="Year" options={grYearOptions} selected={selectedYears} onChange={setSelectedYears} />
         <MultiSelect label="Month" options={grMonthOptions} selected={selectedMonths} onChange={setSelectedMonths} />
-        <MultiSelect
-          label="Storage Locations"
-          options={locationOptions}
-          selected={selectedLocations}
-          onChange={setSelectedLocations}
-          className="min-w-[180px]"
-        />
-        <MultiSelect
-          label="Product Types"
-          options={productTypeOptions}
-          selected={selectedProducts}
-          onChange={setSelectedProducts}
-          className="min-w-[160px]"
-        />
-        <MultiSelect
-          label="Value Columns"
-          options={VALUE_COLS}
-          selected={selectedValueCols}
-          onChange={setSelectedValueCols}
-          className="min-w-[200px]"
-        />
-        <p className="pb-2 text-xs text-muted-foreground">
-          {storageDetailed.length} of {allStorageDetailed.length} locations shown — trend, charts &amp; table compare the selection
-        </p>
+        <MultiSelect label="Date" options={dateOptions} selected={selectedDates} onChange={setSelectedDates} />
+        <MultiSelect label="Product Type" options={productTypeOptions} selected={selectedProducts} onChange={setSelectedProducts} />
+        <MultiSelect label="Storage Location" options={locationOptions} selected={selectedLocations} onChange={setSelectedLocations} searchable />
+        <MultiSelect label="Age Bucket" options={STORAGE_AGE_BUCKETS} selected={selectedBuckets} onChange={setSelectedBuckets} />
+        <MultiSelect label="Value Column" options={VALUE_COLS} selected={selectedValueCols} onChange={setSelectedValueCols} />
       </div>
 
       <MonthlyTrend

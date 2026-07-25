@@ -133,21 +133,21 @@ export default function LoginPage() {
               />
               <div>
                 <motion.div
-                  className="flex items-center gap-3"
+                  className="flex items-center gap-4"
                   initial={{ opacity: 0, x: -24 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.25, duration: 0.6 }}
                 >
                   <motion.div
-                    className="flex size-11 items-center justify-center rounded-xl bg-white/20 backdrop-blur"
-                    animate={{ rotate: [0, 6, -6, 0] }}
-                    transition={{ duration: 6, repeat: Infinity, ease: 'easeInOut' }}
+                    className="flex h-16 items-center justify-center rounded-2xl bg-white p-2.5 shadow-2xl ring-2 ring-white/40"
+                    animate={{ scale: [1, 1.03, 1] }}
+                    transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut' }}
                   >
-                    <BarChart3 className="size-6 text-white" />
+                    <img src="/logo-bold-dark.png" alt="Sona Comstar" className="h-full w-auto object-contain" />
                   </motion.div>
                   <div>
-                    <p className="text-lg font-bold tracking-wide text-white">SONA COMSTAR</p>
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-white/70">
+                    <p className="text-xl font-black tracking-wider text-white">SONA COMSTAR</p>
+                    <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-cyan-200">
                       Inventory Analytics
                     </p>
                   </div>

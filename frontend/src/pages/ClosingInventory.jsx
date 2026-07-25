@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useState } from 'react';
+import { useMemo, useCallback, useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import * as echarts from 'echarts/core';
@@ -51,36 +51,95 @@ const TYPE_COLORS = {
   YSCP: '#8b5cf6',
 };
 
+import { STORAGE_AGE_BUCKETS } from '../config/constants';
+
 export default function InventoryPage() {
-  const { data: summaryData, isLoading, isError, error } = useDashboardSummary();
+  const [selectedYears, setSelectedYears] = useState([]);
+  const [selectedMonths, setSelectedMonths] = useState([]);
+  const [selectedDates, setSelectedDates] = useState([]);
+  const [selectedProducts, setSelectedProducts] = useState([]);
+  const [selectedLocations, setSelectedLocations] = useState([]);
+  const [selectedBuckets, setSelectedBuckets] = useState([]);
+
+  const MONTH_NAMES_FULL = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+
+  const yearQuery = selectedYears.length === 1 ? selectedYears[0] : '';
+  const monthName = selectedMonths.length === 1 ? selectedMonths[0] : '';
+  const monthQuery = monthName ? String(MONTH_NAMES_FULL.indexOf(monthName) + 1) : '';
+  const datesQuery = selectedDates.length > 0 ? selectedDates : [];
+
+  const { data: summaryData, isLoading, isError, error } = useDashboardSummary({
+    year: yearQuery,
+    month: monthQuery,
+    dates: datesQuery,
+  });
+
+  const maxDays = useMemo(() => {
+    const years = selectedYears.length > 0 ? selectedYears.map(Number) : [new Date().getFullYear()];
+    const months = selectedMonths.length > 0 ? selectedMonths.map(m => MONTH_NAMES_FULL.indexOf(m)) : Array.from({length: 12}, (_, i) => i);
+    
+    let max = 31;
+    if (selectedMonths.length > 0) {
+      max = 0;
+      for (const y of years) {
+        for (const m of months) {
+          if (m >= 0 && m < 12) {
+            const days = new Date(y, m + 1, 0).getDate();
+            if (days > max) max = days;
+          }
+        }
+      }
+    }
+    return max;
+  }, [selectedYears, selectedMonths]);
+
+  const dateOptions = useMemo(() => {
+    return Array.from({ length: maxDays }, (_, i) => String(i + 1));
+  }, [maxDays]);
+
+  useEffect(() => {
+    if (selectedDates.length > 0) {
+      const validDates = selectedDates.filter(d => Number(d) <= maxDays);
+      if (validDates.length !== selectedDates.length) {
+        setSelectedDates(validDates);
+      }
+    }
+  }, [maxDays, selectedDates]);
+
   const { data: filterOptions = {} } = useFilterOptions();
   const gf = useFilterStore();
   const exportMutation = useExportData();
 
   const handleExport = useCallback(
     (format) => {
-      exportMutation.mutate({ module: 'inventory', format });
+      exportMutation.mutate({
+        module: 'inventory',
+        format,
+        years: selectedYears,
+        months: selectedMonths.map(m => MONTH_NAMES_FULL.indexOf(m) + 1),
+        products: selectedProducts,
+        locations: selectedLocations,
+        days: selectedBuckets,
+        dayDates: selectedDates,
+      });
     },
-    [exportMutation]
+    [exportMutation, selectedYears, selectedMonths, selectedProducts, selectedLocations, selectedBuckets, selectedDates]
   );
 
-  const totalValue = summaryData?.inventory?.totalValue ?? 0;
-  const totalStock = summaryData?.inventory?.totalStock ?? 0;
-  const materialCount = summaryData?.inventory?.materialCount ?? 0;
   const byType = summaryData?.inventory?.inventoryByType ?? [];
 
-  const [selectedYears, setSelectedYears] = useState([]);
-  const [selectedMonths, setSelectedMonths] = useState([]);
+  const filteredByType = useMemo(() => {
+    if (selectedProducts.length === 0) return byType;
+    return byType.filter((t) => selectedProducts.includes(t.type));
+  }, [byType, selectedProducts]);
 
   const allPeriods = summaryData?.inventory?.periodSummaries ?? [];
-  const yearOptions = useMemo(
-    () => [...new Set(allPeriods.map((p) => p.period.split(' ')[1]).filter(Boolean))].sort(),
-    [allPeriods]
-  );
-  const monthOptions = useMemo(
-    () => [...new Set(allPeriods.map((p) => p.period.split(' ')[0]))],
-    [allPeriods]
-  );
+  const yearOptions = useMemo(() => filterOptions.years?.map(String) || [], [filterOptions]);
+  const monthOptions = useMemo(() => filterOptions.months?.map((m) => m.name) || [], [filterOptions]);
+
   const filteredPeriods = useMemo(() => {
     return allPeriods.filter((p) => {
       const [month, year] = p.period.split(' ');
@@ -89,6 +148,27 @@ export default function InventoryPage() {
       return true;
     });
   }, [allPeriods, selectedYears, selectedMonths]);
+
+  const totalValue = useMemo(() => {
+    if (selectedProducts.length > 0) {
+      return filteredByType.reduce((s, t) => s + t.totalValue, 0);
+    }
+    return filteredPeriods.length > 0 ? filteredPeriods[filteredPeriods.length - 1].totalValue : (summaryData?.inventory?.totalValue ?? 0);
+  }, [filteredByType, selectedProducts, filteredPeriods, summaryData]);
+
+  const totalStock = useMemo(() => {
+    if (selectedProducts.length > 0) {
+      return filteredByType.reduce((s, t) => s + t.totalStock, 0);
+    }
+    return filteredPeriods.length > 0 ? filteredPeriods[filteredPeriods.length - 1].totalStock : (summaryData?.inventory?.totalStock ?? 0);
+  }, [filteredByType, selectedProducts, filteredPeriods, summaryData]);
+
+  const materialCount = useMemo(() => {
+    if (selectedProducts.length > 0) {
+      return filteredByType.reduce((s, t) => s + t.count, 0);
+    }
+    return filteredPeriods.length > 0 ? filteredPeriods[filteredPeriods.length - 1].materialCount : (summaryData?.inventory?.materialCount ?? 0);
+  }, [filteredByType, selectedProducts, filteredPeriods, summaryData]);
 
   const monthlyComparisonOption = useMemo(() => {
     const periods = filteredPeriods.length > 0 ? filteredPeriods : allPeriods;
@@ -136,8 +216,8 @@ export default function InventoryPage() {
   }, [filteredPeriods, allPeriods]);
 
   const typeComparisonOption = useMemo(() => {
-    const types = byType.map((t) => t.type);
-    const values = byType.map((t) => t.totalValue);
+    const types = filteredByType.map((t) => t.type);
+    const values = filteredByType.map((t) => t.totalValue);
 
     return {
       tooltip: {
@@ -177,7 +257,7 @@ export default function InventoryPage() {
         },
       ],
     };
-  }, [byType]);
+  }, [filteredByType]);
 
   if (isLoading && !summaryData) return <PageSkeleton />;
   if (isError)
@@ -219,21 +299,15 @@ export default function InventoryPage() {
         }
       />
 
-      <GlobalFilters
-        filters={gf}
-        onChange={(f) => gf.setFilters(f)}
-        options={filterOptions}
-      />
-
-      {allPeriods.length > 0 && (
-        <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border/50 bg-card p-4">
-          <MultiSelect label="Year" options={yearOptions} selected={selectedYears} onChange={setSelectedYears} />
-          <MultiSelect label="Month" options={monthOptions} selected={selectedMonths} onChange={setSelectedMonths} />
-          <p className="pb-2 text-xs text-muted-foreground">
-            {filteredPeriods.length} of {allPeriods.length} periods selected — compare trends below
-          </p>
-        </div>
-      )}
+      {/* Filters */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 rounded-xl border border-border/50 bg-card p-4 items-end">
+        <MultiSelect label="Year" options={yearOptions} selected={selectedYears} onChange={setSelectedYears} />
+        <MultiSelect label="Month" options={monthOptions} selected={selectedMonths} onChange={setSelectedMonths} />
+        <MultiSelect label="Date" options={dateOptions} selected={selectedDates} onChange={setSelectedDates} />
+        <MultiSelect label="Product Type" options={filterOptions.products || []} selected={selectedProducts} onChange={setSelectedProducts} />
+        <MultiSelect label="Storage Location" options={filterOptions.locations || []} selected={selectedLocations} onChange={setSelectedLocations} searchable />
+        <MultiSelect label="Age Bucket" options={STORAGE_AGE_BUCKETS} selected={selectedBuckets} onChange={setSelectedBuckets} />
+      </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <KPICard label="Total Value" value={totalValue} format="currency" icon={IndianRupee} color="emerald" index={0} />
@@ -243,7 +317,7 @@ export default function InventoryPage() {
 
       {filteredPeriods.length > 0 && <PeriodTrend periods={filteredPeriods} startIndex={0} />}
 
-      {byType.length > 0 && (
+      {filteredByType.length > 0 && (
         <section className="rounded-xl border border-border/50 bg-card p-5">
           <h2 className="mb-3 text-base font-semibold">Inventory by Type</h2>
           <div className="overflow-x-auto">
@@ -258,7 +332,7 @@ export default function InventoryPage() {
                 </tr>
               </thead>
               <tbody>
-                {byType.map((t) => (
+                {filteredByType.map((t) => (
                   <tr key={t.type} className="border-b border-border/30 hover:bg-muted/30">
                     <td className="py-2 px-3 font-medium">{t.type}</td>
                     <td className="py-2 px-3 text-right tabular-nums">{t.count.toLocaleString('en-IN')}</td>

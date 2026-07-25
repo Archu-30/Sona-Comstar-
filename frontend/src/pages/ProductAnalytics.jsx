@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import * as echarts from 'echarts/core';
@@ -40,12 +40,62 @@ function fmtInr(v) {
 }
 
 export default function ProductAnalyticsPage() {
-  const { data: summary, isLoading, isError, error } = useDashboardSummary();
-  const { data: filterOptions = {} } = useFilterOptions();
-  const gf = useFilterStore();
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [selectedYears, setSelectedYears] = useState([]);
   const [selectedMonths, setSelectedMonths] = useState([]);
+  const [selectedDates, setSelectedDates] = useState([]);
+  const [selectedBuckets, setSelectedBuckets] = useState([]);
+
+  const MONTH_NAMES_FULL = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+
+  const yearQuery = selectedYears.length === 1 ? selectedYears[0] : '';
+  const monthName = selectedMonths.length === 1 ? selectedMonths[0] : '';
+  const monthQuery = monthName ? String(MONTH_NAMES_FULL.indexOf(monthName) + 1) : '';
+  const datesQuery = selectedDates.length > 0 ? selectedDates : [];
+
+  const { data: summary, isLoading, isError, error } = useDashboardSummary({
+    year: yearQuery,
+    month: monthQuery,
+    dates: datesQuery,
+  });
+
+  const maxDays = useMemo(() => {
+    const years = selectedYears.length > 0 ? selectedYears.map(Number) : [new Date().getFullYear()];
+    const months = selectedMonths.length > 0 ? selectedMonths.map(m => MONTH_NAMES_FULL.indexOf(m)) : Array.from({length: 12}, (_, i) => i);
+    
+    let max = 31;
+    if (selectedMonths.length > 0) {
+      max = 0;
+      for (const y of years) {
+        for (const m of months) {
+          if (m >= 0 && m < 12) {
+            const days = new Date(y, m + 1, 0).getDate();
+            if (days > max) max = days;
+          }
+        }
+      }
+    }
+    return max;
+  }, [selectedYears, selectedMonths]);
+
+  const dateOptions = useMemo(() => {
+    return Array.from({ length: maxDays }, (_, i) => String(i + 1));
+  }, [maxDays]);
+
+  useEffect(() => {
+    if (selectedDates.length > 0) {
+      const validDates = selectedDates.filter(d => Number(d) <= maxDays);
+      if (validDates.length !== selectedDates.length) {
+        setSelectedDates(validDates);
+      }
+    }
+  }, [maxDays, selectedDates]);
+
+  const { data: filterOptions = {} } = useFilterOptions();
+  const gf = useFilterStore();
 
   const productAgeing = summary?.productAnalytics ?? [];
   const bucketNames = STORAGE_AGE_BUCKETS;
@@ -56,14 +106,8 @@ export default function ProductAnalyticsPage() {
   );
 
   const allPeriods = summary?.inventory?.periodSummaries ?? [];
-  const yearOptions = useMemo(
-    () => [...new Set(allPeriods.map((p) => p.period.split(' ')[1]).filter(Boolean))].sort(),
-    [allPeriods]
-  );
-  const monthOptions = useMemo(
-    () => [...new Set(allPeriods.map((p) => p.period.split(' ')[0]))],
-    [allPeriods]
-  );
+  const yearOptions = useMemo(() => filterOptions.years?.map(String) || [], [filterOptions]);
+  const monthOptions = useMemo(() => filterOptions.months?.map((m) => m.name) || [], [filterOptions]);
   const filteredPeriods = useMemo(() => {
     return allPeriods.filter((p) => {
       const [month, year] = p.period.split(' ');
@@ -76,13 +120,20 @@ export default function ProductAnalyticsPage() {
   const products = useMemo(() => {
     const rows = productAgeing.map((p) => {
       const buckets = {};
+      let filteredValue = 0;
+      let filteredQuantity = 0;
       for (const b of p.buckets) {
+        const isMatched = selectedBuckets.length === 0 || selectedBuckets.includes(b.bucket);
+        if (isMatched) {
+          filteredValue += b.totalValue || 0;
+          filteredQuantity += b.totalQuantity || 0;
+        }
         buckets[b.bucket] = b.totalValue;
       }
       return {
         productType: p.productType,
-        totalValue: p.totalValue,
-        totalQuantity: p.totalQuantity,
+        totalValue: selectedBuckets.length === 0 ? p.totalValue : filteredValue,
+        totalQuantity: selectedBuckets.length === 0 ? p.totalQuantity : filteredQuantity,
         materialCount: p.materialCount,
         avgAge: p.avgAge,
         inventoryPercentage: p.inventoryPercentage,
@@ -91,7 +142,7 @@ export default function ProductAnalyticsPage() {
     });
     if (selectedProducts.length === 0) return rows;
     return rows.filter((r) => selectedProducts.includes(r.productType));
-  }, [productAgeing, selectedProducts]);
+  }, [productAgeing, selectedProducts, selectedBuckets]);
 
   const grandTotalValue = useMemo(
     () => products.reduce((s, p) => s + p.totalValue, 0),
@@ -186,25 +237,13 @@ export default function ProductAnalyticsPage() {
         description="Product-wise ageing analysis calculated from SAP inventory data."
       />
 
-      <GlobalFilters
-        filters={gf}
-        onChange={(f) => gf.setFilters(f)}
-        options={filterOptions}
-      />
-
-      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border/50 bg-card p-4">
+      {/* Filters */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 rounded-xl border border-border/50 bg-card p-4 items-end">
         <MultiSelect label="Year" options={yearOptions} selected={selectedYears} onChange={setSelectedYears} />
         <MultiSelect label="Month" options={monthOptions} selected={selectedMonths} onChange={setSelectedMonths} />
-        <MultiSelect
-          label="Product Types"
-          options={productOptions}
-          selected={selectedProducts}
-          onChange={setSelectedProducts}
-          className="min-w-[180px]"
-        />
-        <p className="pb-2 text-xs text-muted-foreground">
-          {products.length} of {productOptions.length} product types · {filteredPeriods.length} of {allPeriods.length} periods — trend &amp; comparison below
-        </p>
+        <MultiSelect label="Date" options={dateOptions} selected={selectedDates} onChange={setSelectedDates} />
+        <MultiSelect label="Product Type" options={productOptions} selected={selectedProducts} onChange={setSelectedProducts} />
+        <MultiSelect label="Age Bucket" options={STORAGE_AGE_BUCKETS} selected={selectedBuckets} onChange={setSelectedBuckets} />
       </div>
 
       {filteredPeriods.length > 0 && (

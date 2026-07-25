@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useState } from 'react';
+import { useMemo, useCallback, useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import * as echarts from 'echarts/core';
@@ -68,37 +68,152 @@ function fmtCompact(val) {
 }
 
 export default function InTransitPage() {
+  const MONTH_NAMES_FULL = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+
+  const [selectedProducts, setSelectedProducts] = useState([]);
+  const [selectedYears, setSelectedYears] = useState([]);
+  const [selectedMonths, setSelectedMonths] = useState([]);
+  const [selectedDates, setSelectedDates] = useState([]);
+  const [selectedLocations, setSelectedLocations] = useState([]);
+  const [selectedBuckets, setSelectedBuckets] = useState([]);
+
+  const yearQuery = selectedYears.length === 1 ? selectedYears[0] : '';
+  const monthName = selectedMonths.length === 1 ? selectedMonths[0] : '';
+  const monthQuery = monthName ? String(MONTH_NAMES_FULL.indexOf(monthName) + 1) : '';
+  const datesQuery = selectedDates.length > 0 ? selectedDates : [];
+
   const { data, isLoading, isError, error } = useImportData({
     page: 1,
     pageSize: 500,
   });
-  const { data: summary } = useDashboardSummary();
+
+  const { data: summary } = useDashboardSummary({
+    year: yearQuery,
+    month: monthQuery,
+    dates: datesQuery,
+  });
+
   const { data: filterOptions = {} } = useFilterOptions();
   const gf = useFilterStore();
 
   const exportMutation = useExportData();
 
-  const handleExport = useCallback(
-    (format) => {
-      exportMutation.mutate({ module: 'git', format });
-    },
-    [exportMutation]
-  );
-
   const rawItems = data?.data ?? [];
-  const [selectedProducts, setSelectedProducts] = useState([]);
-  const [selectedYears, setSelectedYears] = useState([]);
-  const [selectedMonths, setSelectedMonths] = useState([]);
 
   const productOptions = useMemo(
     () => [...new Set(rawItems.map((i) => i.product || 'Other'))].sort(),
     [rawItems]
   );
 
+  const locationOptions = useMemo(
+    () => filterOptions.locations || [],
+    [filterOptions]
+  );
+
+  const maxDays = useMemo(() => {
+    const years = selectedYears.length > 0 ? selectedYears.map(Number) : [new Date().getFullYear()];
+    const months = selectedMonths.length > 0 ? selectedMonths.map(m => MONTH_NAMES_FULL.indexOf(m)) : Array.from({length: 12}, (_, i) => i);
+    
+    let max = 31;
+    if (selectedMonths.length > 0) {
+      max = 0;
+      for (const y of years) {
+        for (const m of months) {
+          if (m >= 0 && m < 12) {
+            const days = new Date(y, m + 1, 0).getDate();
+            if (days > max) max = days;
+          }
+        }
+      }
+    }
+    return max;
+  }, [selectedYears, selectedMonths]);
+
+  const dateOptions = useMemo(() => {
+    return Array.from({ length: maxDays }, (_, i) => String(i + 1));
+  }, [maxDays]);
+
+  useEffect(() => {
+    if (selectedDates.length > 0) {
+      const validDates = selectedDates.filter(d => Number(d) <= maxDays);
+      if (validDates.length !== selectedDates.length) {
+        setSelectedDates(validDates);
+      }
+    }
+  }, [maxDays, selectedDates]);
+
+  const yearOptions = useMemo(() => {
+    const years = new Set();
+    for (const item of rawItems) {
+      if (!item.invoiceDate) continue;
+      const d = new Date(item.invoiceDate);
+      if (!isNaN(d.getTime())) {
+        years.add(String(d.getFullYear()));
+      }
+    }
+    return [...years].sort();
+  }, [rawItems]);
+
+  const monthOptions = useMemo(() => {
+    const months = new Set();
+    for (const item of rawItems) {
+      if (!item.invoiceDate) continue;
+      const d = new Date(item.invoiceDate);
+      if (!isNaN(d.getTime())) {
+        months.add(MONTH_NAMES_FULL[d.getMonth()]);
+      }
+    }
+    return [...months].sort((a, b) => MONTH_NAMES_FULL.indexOf(a) - MONTH_NAMES_FULL.indexOf(b));
+  }, [rawItems]);
+
   const allItems = useMemo(() => {
-    if (selectedProducts.length === 0) return rawItems;
-    return rawItems.filter((i) => selectedProducts.includes(i.product || 'Other'));
-  }, [rawItems, selectedProducts]);
+    return rawItems.filter((i) => {
+      // 1. Product Type filter
+      if (selectedProducts.length > 0 && !selectedProducts.includes(i.product || 'Other')) return false;
+
+      // Date parsing for Year/Month/Date
+      if (i.invoiceDate) {
+        const d = new Date(i.invoiceDate);
+        if (!isNaN(d.getTime())) {
+          const yr = String(d.getFullYear());
+          const mo = MONTH_NAMES_FULL[d.getMonth()];
+          const dt = String(d.getDate());
+          if (selectedYears.length > 0 && !selectedYears.includes(yr)) return false;
+          if (selectedMonths.length > 0 && !selectedMonths.includes(mo)) return false;
+          if (selectedDates.length > 0 && !selectedDates.includes(dt)) return false;
+        }
+      } else {
+        if (selectedYears.length > 0 || selectedMonths.length > 0 || selectedDates.length > 0) return false;
+      }
+
+      // 2. Age Bucket filter
+      if (selectedBuckets.length > 0) {
+        const days = calculateGitAge(i.invoiceDate);
+        const bucket = getGitAgeBucket(days);
+        if (!selectedBuckets.includes(bucket)) return false;
+      }
+
+      return true;
+    });
+  }, [rawItems, selectedProducts, selectedYears, selectedMonths, selectedDates, selectedBuckets]);
+
+  const handleExport = useCallback(
+    (format) => {
+      exportMutation.mutate({
+        module: 'git',
+        format,
+        years: selectedYears,
+        months: selectedMonths.map(m => MONTH_NAMES_FULL.indexOf(m) + 1), // backend expects 1-12 month integers
+        products: selectedProducts,
+        days: selectedBuckets,
+        dayDates: selectedDates,
+      });
+    },
+    [exportMutation, selectedYears, selectedMonths, selectedProducts, selectedBuckets, selectedDates]
+  );
 
   // Invoice-month trend computed from the (product-filtered) items so it
   // responds to the Products filter as well as Year/Month
@@ -512,28 +627,14 @@ export default function InTransitPage() {
       />
 
       {/* Filters */}
-      <GlobalFilters
-        filters={gf}
-        onChange={(f) => gf.setFilters(f)}
-        options={filterOptions}
-      />
-
-      {productOptions.length > 0 && (
-        <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border/50 bg-card p-4">
-          <MultiSelect label="Year" options={trendYearOptions} selected={selectedYears} onChange={setSelectedYears} />
-          <MultiSelect label="Month" options={trendMonthOptions} selected={selectedMonths} onChange={setSelectedMonths} />
-          <MultiSelect
-            label="Products"
-            options={productOptions}
-            selected={selectedProducts}
-            onChange={setSelectedProducts}
-            className="min-w-[180px]"
-          />
-          <p className="pb-2 text-xs text-muted-foreground">
-            {allItems.length} of {rawItems.length} GIT items shown — KPIs, trend &amp; charts compare the selection
-          </p>
-        </div>
-      )}
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 rounded-xl border border-border/50 bg-card p-4 items-end">
+        <MultiSelect label="Year" options={yearOptions} selected={selectedYears} onChange={setSelectedYears} />
+        <MultiSelect label="Month" options={monthOptions} selected={selectedMonths} onChange={setSelectedMonths} />
+        <MultiSelect label="Date" options={dateOptions} selected={selectedDates} onChange={setSelectedDates} />
+        <MultiSelect label="Product Type" options={productOptions} selected={selectedProducts} onChange={setSelectedProducts} />
+        <MultiSelect label="Storage Location" options={locationOptions} selected={selectedLocations} onChange={setSelectedLocations} searchable />
+        <MultiSelect label="Age Bucket" options={GIT_AGE_BUCKETS} selected={selectedBuckets} onChange={setSelectedBuckets} />
+      </div>
 
       <MonthlyTrend
         data={invoiceTrend}

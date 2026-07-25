@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useLocation, Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronLeft, Zap } from 'lucide-react';
+import { ChevronLeft } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { navigation } from '../../config/navigation';
 import { useSidebarStore } from '../../store/sidebarStore';
@@ -12,9 +12,10 @@ import { Button } from '../ui/Button';
 
 function SidebarLogo({ collapsed }) {
   return (
-    <div className="flex h-16 items-center gap-3 px-4 border-b border-border/50">
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-accent">
-        <Zap className="size-5 text-white" />
+    <div className="flex h-16 items-center gap-3 px-4 border-b border-border/50 bg-background/40">
+      <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-white p-1.5 shadow-md border border-slate-200 dark:border-slate-800 dark:bg-slate-900 ring-1 ring-black/5">
+        <img src="/logo-icon-bold-dark.png" alt="Sona Comstar" className="size-full object-contain dark:hidden" />
+        <img src="/logo-icon-bold-white.png" alt="Sona Comstar" className="hidden size-full object-contain dark:block" />
       </div>
       <AnimatePresence mode="wait">
         {!collapsed && (
@@ -26,10 +27,10 @@ function SidebarLogo({ collapsed }) {
             className="overflow-hidden"
           >
             <div className="whitespace-nowrap">
-              <p className="text-sm font-bold tracking-tight text-foreground">
-                Sona Comstar
+              <p className="text-base font-black tracking-tight text-foreground">
+                SONA COMSTAR
               </p>
-              <p className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-primary">
                 Inventory Analytics
               </p>
             </div>

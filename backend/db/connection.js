@@ -20,11 +20,16 @@ function getPool() {
   return pool;
 }
 
+function initPool() {
+  getPool();
+}
+
 async function testConnection() {
   try {
     const conn = await getPool().getConnection();
     conn.release();
     _available = true;
+    console.log('[MySQL] Connection verified — available');
     return true;
   } catch (err) {
     _available = false;
@@ -33,8 +38,13 @@ async function testConnection() {
   }
 }
 
+async function ensureAvailable() {
+  if (_available) return true;
+  return testConnection();
+}
+
 function isAvailable() {
   return _available;
 }
 
-module.exports = { getPool, testConnection, isAvailable };
+module.exports = { getPool, initPool, testConnection, ensureAvailable, isAvailable };

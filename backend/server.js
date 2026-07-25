@@ -12,10 +12,11 @@ const historyRouter = require('./routes/history');
 
 const { testConnection } = require('./db/connection');
 const { runSchema }      = require('./db/schema');
-const { seedFromExcel }  = require('./db/seed');
+const { seedFromExcel, replaceClosing, derivePeriod, defaultPeriod } = require('./db/seed');
+const { getClosingInventory, getOriginalAgeingPath } = require('../database/index');
 
 const app  = express();
-const PORT = 5000;
+const PORT = Number(process.env.PORT) || 5000;
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
@@ -30,6 +31,35 @@ app.use('/api/upload',       uploadRouter);
 app.use('/api/filters',  filtersRouter);
 app.use('/api/db',       reportsDbRouter);
 app.use('/api/history',  historyRouter);
+
+// Admin: fix invalid aging_days in DB (Excel date serials stored as day counts)
+app.post('/api/admin/fix-aging-days', async (req, res) => {
+  try {
+    const { getPool } = require('./db/connection');
+    const pool = getPool();
+    const [result] = await pool.execute(
+      'UPDATE inventory_items SET aging_days = -1 WHERE aging_days > 9999 OR aging_days < -1'
+    );
+    res.json({ ok: true, rowsFixed: result.affectedRows });
+  } catch (err) {
+    console.error('[admin/fix-aging-days]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin: force-replace closing inventory from Excel (fixes stale DB data)
+app.post('/api/admin/refresh-closing', async (req, res) => {
+  try {
+    const closingPeriods = getClosingInventory();
+    const filename = require('path').basename(getOriginalAgeingPath());
+    const period = derivePeriod('ageing', filename, [], null);
+    const result = await replaceClosing(closingPeriods, null, period);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[admin/refresh-closing]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error:', err);

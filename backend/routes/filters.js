@@ -21,7 +21,8 @@ router.get('/', async (req, res) => {
   }
   try {
     const pool = getPool();
-    const [[products], [locations], [materials], [years], [months], [periods], [dates]] = await Promise.all([
+    const [[products], [locations], [materials], [years], [months], [periods], [dates],
+           [reportYears], [reportMonths], [reportDates]] = await Promise.all([
       pool.execute(
         'SELECT DISTINCT product_type FROM inventory_items WHERE product_type IS NOT NULL AND product_type != "" ORDER BY product_type'
       ),
@@ -43,6 +44,15 @@ router.get('/', async (req, res) => {
       pool.execute(
         'SELECT d FROM (SELECT DISTINCT DATE_FORMAT(gr_date, "%Y-%m-%d") AS d FROM inventory_items WHERE gr_date IS NOT NULL) t ORDER BY d DESC LIMIT 500'
       ),
+      pool.execute(
+        'SELECT DISTINCT report_year AS yr FROM inventory_items WHERE report_year > 0 ORDER BY report_year DESC'
+      ),
+      pool.execute(
+        'SELECT DISTINCT report_month AS mo FROM inventory_items WHERE report_month > 0 ORDER BY report_month'
+      ),
+      pool.execute(
+        'SELECT DISTINCT DATE_FORMAT(report_date, "%Y-%m-%d") AS d FROM inventory_items WHERE report_date IS NOT NULL ORDER BY d DESC LIMIT 100'
+      ),
     ]);
 
     res.json({
@@ -56,6 +66,11 @@ router.get('/', async (req, res) => {
         .filter((m) => m.name),
       periods: periods.map((r) => r.period_name),
       dates: dates.map((r) => r.d).filter(Boolean),
+      reportYears: reportYears.map((r) => r.yr).filter(Boolean),
+      reportMonths: reportMonths
+        .map((r) => ({ index: r.mo, name: MONTH_NAMES[(r.mo || 1) - 1] || '' }))
+        .filter((m) => m.name),
+      reportDates: reportDates.map((r) => r.d).filter(Boolean),
     });
   } catch (err) {
     console.error('[filters]', err);

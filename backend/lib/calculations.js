@@ -135,7 +135,7 @@ function calculateAgeing(items) {
     buckets[bucket].totalValue += itemValue(item);
     buckets[bucket].totalQuantity += item.unrestricted;
     buckets[bucket].materials.add(item.material);
-    buckets[bucket].totalAge += ageDays;
+    if (ageDays >= 0) buckets[bucket].totalAge += ageDays;
   }
 
   return BUCKET_ORDER
@@ -160,7 +160,7 @@ function calculateAverageInventoryAge(items) {
   let count = 0;
   for (const item of items) {
     const ageDays = itemAgeDays(item);
-    if (ageDays > 0) {
+    if (ageDays >= 0) {
       totalAge += ageDays;
       count++;
     }
@@ -181,10 +181,17 @@ function emptyBuckets() {
 // uses for bucket assignments. Col Z ("Aging(Date of Rcpt)") is a slightly different
 // value and must NOT be used for bucket assignment.
 // Falls back to agingDateOfReceipt (Col Z) only if AA column is absent/zero.
+// Guard: values >= 10000 (>27 years) are Excel date serial numbers accidentally read as
+// day-counts — typically seen on rows without a GR date.
+// Returns -1 (→ "Unknown" bucket) when no valid age is found so these rows are not
+// misclassified as "0-30 Days".
+const MAX_VALID_AGE_DAYS = 9999;
 function itemAgeDays(item) {
-  if (item.aaAgingDays > 0) return item.aaAgingDays;
-  if (item.agingDateOfReceipt > 0) return item.agingDateOfReceipt;
-  return 0;
+  const aa = item.aaAgingDays;
+  if (aa > 0 && aa <= MAX_VALID_AGE_DAYS) return aa;
+  const adr = item.agingDateOfReceipt;
+  if (adr > 0 && adr <= MAX_VALID_AGE_DAYS) return adr;
+  return -1;
 }
 
 // Inventory value per row = Column AF "Total Value".
@@ -291,10 +298,10 @@ function calculateStorageLocationAgeingDetailed(items) {
     entry.totalValue += val;
     entry.totalQuantity += item.unrestricted;
     entry.materials.add(item.material);
-    entry.totalAge += ageDays;
+    if (ageDays >= 0) entry.totalAge += ageDays;
     entry.count++;
-    if (ageDays > entry.oldest) entry.oldest = ageDays;
-    if (ageDays < entry.newest) entry.newest = ageDays;
+    if (ageDays >= 0 && ageDays > entry.oldest) entry.oldest = ageDays;
+    if (ageDays >= 0 && ageDays < entry.newest) entry.newest = ageDays;
     const b = getAgeBucket(ageDays);
     if (entry.buckets[b]) {
       entry.buckets[b].count++;
@@ -359,10 +366,10 @@ function calculateProductAgeing(items) {
     entry.totalValue += val;
     entry.totalQuantity += item.unrestricted;
     entry.materials.add(item.material);
-    entry.totalAge += ageDays;
+    if (ageDays >= 0) entry.totalAge += ageDays;
     entry.count++;
-    if (ageDays > entry.oldest) entry.oldest = ageDays;
-    if (ageDays < entry.newest) entry.newest = ageDays;
+    if (ageDays >= 0 && ageDays > entry.oldest) entry.oldest = ageDays;
+    if (ageDays >= 0 && ageDays < entry.newest) entry.newest = ageDays;
     const b = getAgeBucket(ageDays);
     if (entry.buckets[b]) {
       entry.buckets[b].count++;
@@ -516,14 +523,14 @@ function calculateStorageLocationAgeing(items) {
       existing.totalValue += itemValue(item);
       existing.totalQuantity += item.unrestricted;
       existing.materials.add(item.material);
-      existing.totalAge += ageDays;
+      if (ageDays >= 0) existing.totalAge += ageDays;
       existing.count++;
     } else {
       map.set(loc, {
         totalValue: itemValue(item),
         totalQuantity: item.unrestricted,
         materials: new Set([item.material]),
-        totalAge: ageDays,
+        totalAge: ageDays >= 0 ? ageDays : 0,
         count: 1,
       });
     }

@@ -38,9 +38,129 @@ const {
   calculateStorageAgeingMatrix,
   calculateGrTrendMatrix,
 } = require('../lib/calculations');
-// No hardcoded filter lists — storage locations and product types are always read dynamically from the Excel.
 
+const { isAvailable, ensureAvailable, getPool } = require('../db/connection');
 
+// ─── MySQL → Excel format mappers ────────────────────────────────────────────
+// These convert MySQL rows to the exact property names the calculation engine
+// expects, so the SAME functions process both Excel and MySQL data.
+
+function mysqlToAgeingItem(row) {
+  return {
+    plant: row.plant,
+    storageLocation: row.storage_location,
+    material: row.material,
+    materialDescription: row.material_desc,
+    productType: row.product_type,
+    batch: row.batch,
+    unrestricted: Number(row.quantity) || 0,
+    valueUnrestricted: Number(row.value_unrestricted) || 0,
+    valInTransfer: Number(row.value_transit) || 0,
+    valueQualInsp: Number(row.value_qual_insp) || 0,
+    valueRestricted: Number(row.value_restricted) || 0,
+    valueBlocked: Number(row.value_blocked) || 0,
+    totalValue: Number(row.total_value) || 0,
+    aaAgingDays: Number(row.aging_days) || 0,
+    grIssueDate: row.gr_date ? new Date(row.gr_date).getTime() : 0,
+  };
+}
+
+function mysqlToClosingPeriods(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    const key = row.period_name;
+    if (!map.has(key)) map.set(key, { period: key, items: [] });
+    map.get(key).items.push({
+      material: row.material,
+      description: row.material_desc,
+      type: row.item_type,
+      totalValue: Number(row.total_value) || 0,
+      totalStock: Number(row.total_stock) || 0,
+    });
+  }
+  return Array.from(map.values());
+}
+
+function mysqlToGitItem(row) {
+  return {
+    invoiceNumber: row.invoice_no,
+    invoiceDate: row.invoice_date ? new Date(row.invoice_date).getTime() : 0,
+    material: row.material,
+    materialDescription: row.material_desc,
+    vendorCode: row.vendor_code,
+    product: row.product,
+    qty: Number(row.quantity) || 0,
+    value: Number(row.value_inr) || 0,
+    cyValue: Number(row.cy_value) || 0,
+    currency: row.currency,
+  };
+}
+
+// ─── MySQL data source helpers ────────────────────────────────────────────────
+
+async function db(pool, sql, binds = []) {
+  if (!binds || binds.length === 0) {
+    const [rows] = await pool.query(sql);
+    return rows;
+  }
+  const [rows] = await pool.execute(sql, binds);
+  return rows;
+}
+
+async function getLatestReportDate(pool, table) {
+  const rows = await db(pool, `SELECT MAX(report_date) AS d FROM ${table} WHERE report_date IS NOT NULL`);
+  return rows[0]?.d || null;
+}
+
+function buildPeriodWhere(table, reportYear, reportMonth, reportDates) {
+  const conds = [];
+  const binds = [];
+  const prefix = table ? `${table}.` : '';
+
+  if (reportYear) {
+    conds.push(`${prefix}report_year = ?`);
+    binds.push(reportYear);
+  }
+  if (reportMonth) {
+    conds.push(`${prefix}report_month = ?`);
+    binds.push(reportMonth);
+  }
+  if (reportDates && reportDates.length > 0) {
+    conds.push(`${prefix}report_date IN (${reportDates.map(() => '?').join(',')})`);
+    binds.push(...reportDates);
+  }
+
+  return { conds, binds };
+}
+
+async function fetchMySQLAgeingItems(pool, reportYear, reportMonth, reportDates) {
+  const { conds, binds } = buildPeriodWhere(null, reportYear, reportMonth, reportDates);
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  const rows = await db(pool, `SELECT * FROM inventory_items ${where} ORDER BY id`, binds);
+  return rows.map(mysqlToAgeingItem);
+}
+
+async function fetchMySQLClosingPeriods(pool, reportYear, reportMonth, reportDates) {
+  const { conds, binds } = buildPeriodWhere(null, reportYear, reportMonth, reportDates);
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  const rows = await db(pool, `SELECT * FROM closing_inventory ${where} ORDER BY period_year, period_month`, binds);
+  return mysqlToClosingPeriods(rows);
+}
+
+async function fetchMySQLGitItems(pool, reportYear, reportMonth, reportDates) {
+  const { conds, binds } = buildPeriodWhere(null, reportYear, reportMonth, reportDates);
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  const rows = await db(pool, `SELECT * FROM git_items ${where} ORDER BY id`, binds);
+  return rows.map(mysqlToGitItem);
+}
+
+async function fetchAvailablePeriods(pool) {
+  const rows = await db(pool,
+    `SELECT DISTINCT report_year AS yr, report_month AS mo, report_date AS d
+     FROM inventory_items WHERE report_year > 0 ORDER BY report_year DESC, report_month DESC, report_date DESC`
+  );
+  return rows;
+}
 
 // --- AI Insight Generator ---
 
@@ -48,7 +168,6 @@ function generateAIInsights(input) {
   const insights = [];
   let id = 1;
 
-  // MoM trend insights
   if (input.periodSummaries.length >= 2) {
     const latest = input.periodSummaries[input.periodSummaries.length - 1];
     if (latest.momValueChange > 0) {
@@ -74,7 +193,6 @@ function generateAIInsights(input) {
     }
   }
 
-  // Dead stock insights
   if (input.deadStockValue > 0) {
     const deadStockPct = (input.deadStockValue / input.totalValue) * 100;
     insights.push({
@@ -88,7 +206,6 @@ function generateAIInsights(input) {
     });
   }
 
-  // Slow moving inventory
   if (input.slowMovingValue > 0) {
     insights.push({
       id: String(id++),
@@ -101,7 +218,6 @@ function generateAIInsights(input) {
     });
   }
 
-  // Average inventory age
   if (input.avgInventoryAge > 60) {
     insights.push({
       id: String(id++),
@@ -114,7 +230,6 @@ function generateAIInsights(input) {
     });
   }
 
-  // Critical GIT invoices
   if (input.criticalGitCount > 0) {
     insights.push({
       id: String(id++),
@@ -127,7 +242,6 @@ function generateAIInsights(input) {
     });
   }
 
-  // Storage location insight (highest ageing)
   if (input.storageLocationAgeing.length > 0) {
     const highestAging = input.storageLocationAgeing.reduce((max, loc) =>
       loc.avgAge > max.avgAge ? loc : max
@@ -145,7 +259,6 @@ function generateAIInsights(input) {
     }
   }
 
-  // Inventory type with highest contribution
   if (input.inventoryByType.length > 0) {
     const highest = input.inventoryByType.reduce((max, t) =>
       t.totalValue > max.totalValue ? t : max
@@ -161,7 +274,6 @@ function generateAIInsights(input) {
     });
   }
 
-  // Cost saving opportunity
   if (input.deadStockValue + input.slowMovingValue > 0) {
     const savingPotential = input.deadStockValue + input.slowMovingValue;
     insights.push({
@@ -199,17 +311,93 @@ function parsePeriod(periodName) {
   return { year, month: monthIdx };
 }
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const filterYear = req.query.year ? parseInt(req.query.year, 10) : null;
     const filterMonth = req.query.month !== undefined && req.query.month !== '' && req.query.month !== 'all'
       ? parseInt(req.query.month, 10)
       : null;
 
-    const allPeriods = getClosingInventory();
-    const periods = sortPeriods(getAvailablePeriods());
+    let filterDates = [];
+    if (req.query.dates) {
+      try {
+        filterDates = JSON.parse(req.query.dates).map(String);
+      } catch (e) {
+        if (typeof req.query.dates === 'string') {
+          filterDates = req.query.dates.split(',').map((s) => s.trim()).filter(Boolean);
+        }
+      }
+    }
 
-    const latestPeriodName = getLatestPeriod();
+    // ── Data source selection ──────────────────────────────────────────────
+    // When MySQL is available and has data, use it as the data source
+    // so that historical uploads are queryable. Otherwise fall back to Excel.
+    let allPeriods, periods, allAgeingItems, gitItems;
+    let useMysql = false;
+    let availableReportPeriods = [];
+
+    if (isAvailable()) {
+      try {
+        const pool = getPool();
+        const cntRows = await db(pool, 'SELECT COUNT(*) AS cnt FROM inventory_items');
+        const cnt = cntRows[0]?.cnt || 0;
+
+        if (cnt > 0) {
+          useMysql = true;
+
+          // Build report_date strings from year+month+date filters
+          let reportDates = [];
+          if (filterYear && filterMonth && filterDates.length > 0) {
+            for (const d of filterDates) {
+              reportDates.push(`${filterYear}-${String(filterMonth).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
+            }
+          }
+
+          // If no specific period filter, use latest report_date
+          const hasFilter = filterYear || filterMonth || filterDates.length > 0;
+          let reportYear = filterYear || null;
+          let reportMonth = filterMonth || null;
+
+          if (!hasFilter) {
+            const latestDate = await getLatestReportDate(pool, 'inventory_items');
+            if (latestDate) {
+              const ld = new Date(latestDate);
+              reportYear = ld.getFullYear();
+              reportMonth = ld.getMonth() + 1;
+              reportDates = [latestDate instanceof Date ? latestDate.toISOString().split('T')[0] : String(latestDate)];
+            }
+          }
+
+          // Fetch historical data from MySQL
+          [allAgeingItems, allPeriods, gitItems] = await Promise.all([
+            fetchMySQLAgeingItems(pool, reportYear, reportMonth, reportDates.length ? reportDates : null),
+            fetchMySQLClosingPeriods(pool, reportYear, reportMonth, reportDates.length ? reportDates : null),
+            fetchMySQLGitItems(pool, reportYear, reportMonth, reportDates.length ? reportDates : null),
+          ]);
+
+          periods = allPeriods.map(p => p.period);
+          availableReportPeriods = await fetchAvailablePeriods(pool);
+
+          console.log(`[SUMMARY] MySQL source — ${allAgeingItems.length} ageing, ${periods.length} closing periods, ${gitItems.length} GIT items`);
+        }
+      } catch (err) {
+        console.error('[SUMMARY] MySQL query failed, falling back to Excel:', err.message);
+        useMysql = false;
+      }
+    }
+
+    if (!useMysql) {
+      // ── Excel fallback (original behavior) ────────────────────────────
+      allPeriods = getClosingInventory();
+      periods = sortPeriods(getAvailablePeriods());
+      allAgeingItems = getInventoryAgeing();
+      gitItems = getImportGIT();
+    }
+
+    // ── From here on, the ENTIRE calculation pipeline is UNCHANGED ─────
+    // The only difference is where allPeriods, allAgeingItems, gitItems came from.
+
+    const latestPeriodName = periods.length > 0 ? periods[periods.length - 1] : null;
     const latestPeriodData = latestPeriodName
       ? allPeriods.find((p) => p.period === latestPeriodName)
       : null;
@@ -245,7 +433,7 @@ router.get('/', (req, res) => {
 
     // Find matching closing inventory periods for the selected filter
     let matchedPeriodMeta = periodMeta;
-    if (filterYear || filterMonth !== null) {
+    if (!useMysql && (filterYear || filterMonth !== null)) {
       matchedPeriodMeta = periodMeta.filter((p) => {
         if (filterYear && p.year !== filterYear) return false;
         if (filterMonth !== null && p.month !== filterMonth) return false;
@@ -264,11 +452,10 @@ router.get('/', (req, res) => {
     const closingInvMaterials = new Set(selectedPeriodItems.map((i) => i.material)).size;
 
     // --- Ageing ---
-    const allAgeingItems = getInventoryAgeing();
+    let ageingItems = allAgeingItems;
 
-    // Filter ageing to materials present in the matched closing inventory period(s)
-    let ageingItems;
-    if (filterYear || filterMonth !== null) {
+    // Excel path: filter ageing by matched closing period materials
+    if (!useMysql && (filterYear || filterMonth !== null)) {
       const matchedMaterials = new Set();
       for (const mp of matchedPeriodMeta) {
         const pd = allPeriods.find((p) => p.period === mp.name);
@@ -278,15 +465,21 @@ router.get('/', (req, res) => {
           }
         }
       }
-      ageingItems = matchedMaterials.size > 0
-        ? allAgeingItems.filter((item) => matchedMaterials.has(item.material))
-        : allAgeingItems;
-    } else {
-      ageingItems = allAgeingItems;
+      if (matchedMaterials.size > 0) {
+        ageingItems = allAgeingItems.filter((item) => matchedMaterials.has(item.material));
+      }
+    }
+
+    if (!useMysql && filterDates.length > 0) {
+      ageingItems = ageingItems.filter((item) => {
+        if (!item.grIssueDate) return false;
+        const d = new Date(item.grIssueDate);
+        return filterDates.includes(String(d.getDate()));
+      });
     }
 
     // Debug validation logging
-    console.log(`[FILTER] year=${filterYear ?? 'all'}, month=${filterMonth ?? 'all'}`);
+    console.log(`[FILTER] year=${filterYear ?? 'all'}, month=${filterMonth ?? 'all'}, source=${useMysql ? 'MySQL' : 'Excel'}`);
     console.log(`[FILTER] Closing inventory periods: ${periods.join(', ')}`);
     console.log(`[FILTER] Matched periods: ${matchedPeriodMeta.map((p) => p.name).join(', ') || 'all'}`);
     console.log(`[FILTER] Selected period: ${selectedPeriodName}`);
@@ -296,16 +489,9 @@ router.get('/', (req, res) => {
     console.log(`[FILTER] Product types: ${new Set(ageingItems.map((i) => i.productType || 'Unknown')).size}`);
 
     // ====================================================================
-    // CALCULATION ENGINE — SINGLE SOURCE OF TRUTH
-    // Source  : Raw Inventory Ageing Excel (all rows, all locations)
-    // Age     : Column Y ONLY  — Aging(Date of Rcpt)  — agingDateOfReceipt
-    // Value   : Column AF ONLY — Value Unrestricted    — valueUnrestricted
-    // Products: ALL distinct values from Product column (dynamic, no whitelist)
-    // Locations: ALL distinct values from Storage Location column (dynamic)
-    // Blanks  : Shown as 'UNASSIGNED PRODUCT' — never excluded
+    // CALCULATION ENGINE — SINGLE SOURCE OF TRUTH (UNCHANGED)
     // ====================================================================
 
-    // Step 1 — Distinct products in raw data (debug report)
     const ageingProductMap = new Map();
     for (const item of ageingItems) {
       const raw = (item.productType || '').trim();
@@ -317,7 +503,6 @@ router.get('/', (req, res) => {
       e.value += v;
     }
 
-    // Step 2 — Distinct storage locations in raw data (debug report)
     const ageingLocMap = new Map();
     for (const item of ageingItems) {
       const loc = (item.storageLocation || '').trim() || '<blank>';
@@ -330,9 +515,6 @@ router.get('/', (req, res) => {
 
     const overallSumColAF = ageingItems.reduce((s, i) => s + itemValue(i), 0);
 
-    // ====================================================================
-    // DEBUG REPORT — printed on every API call
-    // ====================================================================
     console.log(`\n${'='.repeat(70)}`);
     console.log(`[ENGINE] FULL DATASET REPORT`);
     console.log(`[ENGINE] Total rows read    : ${ageingItems.length}`);
@@ -350,9 +532,6 @@ router.get('/', (req, res) => {
     }
     console.log(`${'='.repeat(70)}\n`);
 
-
-    // All ageing KPI calculations use ALL rows (ageingItems) directly.
-    // No location filter — no product filter — every row is counted.
     const ageingBuckets = calculateAgeing(ageingItems);
     const totalUnrestrictedValue = overallSumColAF;
     const deadStockValue = calculateDeadStock(ageingItems);
@@ -367,20 +546,27 @@ router.get('/', (req, res) => {
     const monthlyGrTrend = calculateMonthlyGrTrend(ageingItems);
     const oldestMaterials = calculateOldestMaterials(ageingItems, 10);
 
-    // --- Import GIT (using Invoice Date for age) ---
-    const gitItems = getImportGIT();
-    const totalImportValue = calculateImportValue(gitItems);
-    const totalCYValue = calculateImportCYValue(gitItems);
-    const vendorCount = new Set(gitItems.map((i) => i.vendorCode)).size;
+    // --- Import GIT ---
+    let filteredGitItems = gitItems;
+    if (!useMysql && filterDates.length > 0) {
+      filteredGitItems = gitItems.filter((item) => {
+        if (!item.invoiceDate) return false;
+        const d = new Date(item.invoiceDate);
+        return filterDates.includes(String(d.getDate()));
+      });
+    }
+    const totalImportValue = calculateImportValue(filteredGitItems);
+    const totalCYValue = calculateImportCYValue(filteredGitItems);
+    const vendorCount = new Set(filteredGitItems.map((i) => i.vendorCode)).size;
 
-    const gitAgeingBuckets = calculateGitAgeing(gitItems);
-    const criticalGitInvoices = calculateCriticalGitInvoices(gitItems);
-    const gitSupplierPending = calculateGitSupplierPending(gitItems);
-    const gitMaterialPending = calculateGitMaterialPending(gitItems, 20);
-    const monthlyInvoiceTrend = calculateMonthlyInvoiceTrend(gitItems);
+    const gitAgeingBuckets = calculateGitAgeing(filteredGitItems);
+    const criticalGitInvoices = calculateCriticalGitInvoices(filteredGitItems);
+    const gitSupplierPending = calculateGitSupplierPending(filteredGitItems);
+    const gitMaterialPending = calculateGitMaterialPending(filteredGitItems, 20);
+    const monthlyInvoiceTrend = calculateMonthlyInvoiceTrend(filteredGitItems);
 
     const currencyMap = new Map();
-    for (const item of gitItems) {
+    for (const item of filteredGitItems) {
       const existing = currencyMap.get(item.currency);
       if (existing) {
         existing.totalValue += item.value;
@@ -398,7 +584,7 @@ router.get('/', (req, res) => {
     );
 
     const productMap = new Map();
-    for (const item of gitItems) {
+    for (const item of filteredGitItems) {
       const product = item.product || 'Unknown';
       const existing = productMap.get(product);
       if (existing) {
@@ -455,20 +641,8 @@ router.get('/', (req, res) => {
       `GIT Import Value: ${Math.round(totalImportValue * 100) / 100}`
     );
 
-    // ====================================================================
-    // PRODUCT ANALYTICS — SINGLE SOURCE OF TRUTH
-    // Source   : ageingItems (ALL rows, ALL locations — no filter)
-    // Age      : Column Y  — Aging(Date of Rcpt)      — agingDateOfReceipt
-    // Value    : Column AF — Value Unrestricted        — valueUnrestricted
-    // Products : ALL distinct values from Product column (dynamic)
-    // Blanks   : Shown as 'UNASSIGNED PRODUCT' — never excluded
-    // Guarantee: SUM(Product Grand Totals) = SUM(Column AF)
-    // ====================================================================
     const productAgeing = calculateProductAgeing(ageingItems);
 
-    // ====================================================================
-    // PRE-RENDER VALIDATION
-    // ====================================================================
     const paGrandTotal = productAgeing.reduce((s, p) => s + p.totalValue, 0);
     const overallColAF = overallSumColAF;
 
@@ -476,7 +650,6 @@ router.get('/', (req, res) => {
     console.log(`[VALIDATION] PRE-RENDER CHECKS`);
     console.log(`${'='.repeat(70)}`);
 
-    // Validate 1: product grand total == overall SUM(Col AF)
     const productVsOverall = Math.abs(paGrandTotal - overallColAF);
     if (productVsOverall > 1) {
       console.error(
@@ -489,7 +662,6 @@ router.get('/', (req, res) => {
       console.log(`[VALIDATION] ✓ SUM(Product Grand Totals) = SUM(Col AF) = ₹${Math.round(paGrandTotal).toLocaleString('en-IN')}`);
     }
 
-    // Validate 2: per-product bucket sum == grand total
     let productBucketPass = true;
     for (const p of productAgeing) {
       const bucketSum = Math.round(p.buckets.reduce((s, b) => s + b.totalValue, 0) * 100) / 100;
@@ -513,7 +685,6 @@ router.get('/', (req, res) => {
     }
     if (productBucketPass) console.log(`[VALIDATION] ✓ ALL PRODUCTS — bucket sums match grand totals`);
 
-    // Validate 3: storage grand total == overall SUM(Col AF)
     const storageGrandTotal = storageLocationAgeingDetailed.reduce((s, l) => s + l.totalValue, 0);
     const storageVsOverall = Math.abs(storageGrandTotal - overallColAF);
     if (storageVsOverall > 1) {
@@ -527,7 +698,6 @@ router.get('/', (req, res) => {
       console.log(`[VALIDATION] ✓ SUM(Storage Grand Totals) = SUM(Col AF) = ₹${Math.round(storageGrandTotal).toLocaleString('en-IN')}`);
     }
 
-    // Validate 4: per-storage bucket sum == grand total
     let storageBucketPass = true;
     for (const loc of storageLocationAgeingDetailed) {
       const bucketSum = Math.round(loc.buckets.reduce((s, b) => s + b.totalValue, 0) * 100) / 100;
@@ -543,12 +713,7 @@ router.get('/', (req, res) => {
     }
     if (storageBucketPass) console.log(`[VALIDATION] ✓ ALL STORAGE LOCATIONS — bucket sums match grand totals`);
 
-    // Validate 5: check for any rows excluded from product analytics
     const productRowCount = productAgeing.reduce((s, p) => s + p.materialCount, 0);
-    if (productRowCount < ageingItems.length) {
-      // materialCount counts DISTINCT materials, not rows — this is expected
-      // Real check: product grand total == overall Col AF (done above)
-    }
 
     console.log(`${'='.repeat(70)}\n`);
 
@@ -568,6 +733,7 @@ router.get('/', (req, res) => {
     });
 
     const summary = {
+      dataSource: useMysql ? 'mysql' : 'excel',
       inventory: {
         totalValue: roundedTotalValue,
         totalStock,
@@ -619,6 +785,9 @@ router.get('/', (req, res) => {
           .sort(([a], [b]) => a - b)
           .map(([index, name]) => ({ index, name })),
       },
+      availableReportPeriods: availableReportPeriods.length > 0
+        ? availableReportPeriods.map(r => ({ year: r.yr, month: r.mo, date: r.d }))
+        : undefined,
     };
 
     res.json(summary);

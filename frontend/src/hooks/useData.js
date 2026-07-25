@@ -1,7 +1,7 @@
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { useDebounce } from './useDebounce';
 
-const API_BASE = 'http://localhost:5000';
+const API_BASE = '';
 const STALE_TIME = 5 * 60 * 1000;
 
 function buildQueryString(module, params, debouncedSearch) {
@@ -86,13 +86,14 @@ export function useImportData(params = {}) {
 }
 
 export function useDashboardSummary(filters = {}) {
-  const { year, month } = filters;
+  const { year, month, dates } = filters;
   return useQuery({
-    queryKey: ['dashboard-summary', year, month],
+    queryKey: ['dashboard-summary', year, month, dates],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (year && year !== 'all') params.set('year', year);
       if (month !== undefined && month !== '' && month !== 'all') params.set('month', month);
+      if (dates && dates.length > 0) params.set('dates', typeof dates === 'string' ? dates : JSON.stringify(dates));
       const qs = params.toString();
       const url = `${API_BASE}/api/data/summary${qs ? `?${qs}` : ''}`;
       const res = await fetch(url);

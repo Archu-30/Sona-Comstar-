@@ -38,7 +38,9 @@ function ageBucketLabel(days) {
   return 'Above 5 Years';
 }
 
+// aging_days = -1 means unknown/invalid (no GR date). Excluded from all age calculations.
 const AGE_CASE = `CASE
+  WHEN aging_days < 0 OR aging_days > 9999 THEN 'Unknown'
   WHEN aging_days BETWEEN 0 AND 30   THEN '0-30 Days'
   WHEN aging_days BETWEEN 31 AND 60  THEN '31-60 Days'
   WHEN aging_days BETWEEN 61 AND 90  THEN '61-90 Days'
@@ -61,20 +63,27 @@ const BUCKET_SUMS = `
   SUM(CASE WHEN aging_days BETWEEN 731 AND 1095 THEN total_value ELSE 0 END) AS b_2yr,
   SUM(CASE WHEN aging_days BETWEEN 1096 AND 1460 THEN total_value ELSE 0 END) AS b_3yr,
   SUM(CASE WHEN aging_days BETWEEN 1461 AND 1825 THEN total_value ELSE 0 END) AS b_4yr,
-  SUM(CASE WHEN aging_days > 1825 THEN total_value ELSE 0 END) AS b_5yr
+  SUM(CASE WHEN aging_days BETWEEN 1826 AND 9999 THEN total_value ELSE 0 END) AS b_5yr
 `;
 
 function buildInventoryWhere(q) {
   const conds = [];
   const binds = [];
 
-  const products   = parseArr(q.products);
-  const locations  = parseArr(q.locations);
-  const materials  = parseArr(q.materials);
-  const dates      = parseArr(q.dates);
-  const days       = parseArr(q.days);
-  const years      = parseArr(q.years).map(Number).filter(Boolean);
-  const months     = parseArr(q.months).map(Number).filter(Boolean);
+  const products     = parseArr(q.products);
+  const locations    = parseArr(q.locations);
+  const materials    = parseArr(q.materials);
+  const dates        = parseArr(q.dates);
+  const days         = parseArr(q.days);
+  const years        = parseArr(q.years).map(Number).filter(Boolean);
+  const months       = parseArr(q.months).map(Number).filter(Boolean);
+  const reportYear   = q.reportYear  ? Number(q.reportYear)  : null;
+  const reportMonth  = q.reportMonth ? Number(q.reportMonth) : null;
+  const reportDates  = parseArr(q.reportDates);
+
+  if (reportYear)         { conds.push('report_year = ?');  binds.push(reportYear); }
+  if (reportMonth)        { conds.push('report_month = ?'); binds.push(reportMonth); }
+  if (reportDates.length) { conds.push(`report_date IN (${reportDates.map(()=>'?').join(',')})`); binds.push(...reportDates); }
 
   if (products.length)  { conds.push(`product_type IN (${products.map(()=>'?').join()})`);  binds.push(...products); }
   if (locations.length) { conds.push(`storage_location IN (${locations.map(()=>'?').join()})`); binds.push(...locations); }
@@ -123,7 +132,7 @@ router.get('/storage-ageing', async (req, res) => {
         ${BUCKET_SUMS},
         SUM(total_value) AS total_value,
         COUNT(*) AS item_count,
-        ROUND(AVG(aging_days)) AS avg_age
+        ROUND(AVG(CASE WHEN aging_days >= 0 AND aging_days <= 9999 THEN aging_days END)) AS avg_age
       FROM inventory_items ${where}
       GROUP BY storage_location, product_type
       ORDER BY storage_location, product_type
@@ -133,8 +142,8 @@ router.get('/storage-ageing', async (req, res) => {
       SELECT
         COUNT(*)  AS total_items,
         ROUND(SUM(total_value),2) AS total_value,
-        ROUND(AVG(aging_days))    AS avg_age,
-        ROUND(SUM(CASE WHEN aging_days > 180 THEN total_value ELSE 0 END),2) AS dead_stock_value,
+        ROUND(AVG(CASE WHEN aging_days >= 0 AND aging_days <= 9999 THEN aging_days END)) AS avg_age,
+        ROUND(SUM(CASE WHEN aging_days BETWEEN 181 AND 9999 THEN total_value ELSE 0 END),2) AS dead_stock_value,
         ROUND(SUM(CASE WHEN aging_days BETWEEN 91 AND 180 THEN total_value ELSE 0 END),2) AS slow_moving_value,
         COUNT(DISTINCT storage_location) AS location_count,
         COUNT(DISTINCT product_type)     AS product_count,
@@ -176,7 +185,7 @@ router.get('/product-ageing', async (req, res) => {
         ROUND(SUM(total_value),2) AS total_value,
         COUNT(DISTINCT material) AS material_count,
         COUNT(*) AS item_count,
-        ROUND(AVG(aging_days)) AS avg_age
+        ROUND(AVG(CASE WHEN aging_days >= 0 AND aging_days <= 9999 THEN aging_days END)) AS avg_age
       FROM inventory_items ${where}
       GROUP BY product_type ORDER BY total_value DESC
     `, binds);
@@ -202,6 +211,12 @@ router.get('/closing-inventory', async (req, res) => {
     const years  = parseArr(req.query.years).map(Number).filter(Boolean);
     const months = parseArr(req.query.months).map(Number).filter(Boolean);
     const mats   = parseArr(req.query.materials);
+    const reportYear  = req.query.reportYear  ? Number(req.query.reportYear)  : null;
+    const reportMonth = req.query.reportMonth ? Number(req.query.reportMonth) : null;
+    const reportDates = parseArr(req.query.reportDates);
+    if (reportYear)          { conds.push('report_year = ?');  binds.push(reportYear); }
+    if (reportMonth)         { conds.push('report_month = ?'); binds.push(reportMonth); }
+    if (reportDates.length)  { conds.push(`report_date IN (${reportDates.map(()=>'?').join(',')})`); binds.push(...reportDates); }
     if (years.length)  { conds.push(`period_year IN (${years.map(()=>'?').join()})`);  binds.push(...years); }
     if (months.length) { conds.push(`period_month IN (${months.map(()=>'?').join()})`); binds.push(...months); }
     if (mats.length)   { conds.push(`material IN (${mats.map(()=>'?').join()})`);       binds.push(...mats); }
@@ -236,14 +251,24 @@ router.get('/git', async (req, res) => {
   try {
     const pool = getPool();
 
+    const gitConds = [];
+    const gitBinds = [];
+    const gitReportYear  = req.query.reportYear  ? Number(req.query.reportYear)  : null;
+    const gitReportMonth = req.query.reportMonth ? Number(req.query.reportMonth) : null;
+    const gitReportDates = parseArr(req.query.reportDates);
+    if (gitReportYear)          { gitConds.push('report_year = ?');  gitBinds.push(gitReportYear); }
+    if (gitReportMonth)         { gitConds.push('report_month = ?'); gitBinds.push(gitReportMonth); }
+    if (gitReportDates.length)  { gitConds.push(`report_date IN (${gitReportDates.map(()=>'?').join(',')})`); gitBinds.push(...gitReportDates); }
+    const gitWhere = gitConds.length ? `WHERE ${gitConds.join(' AND ')}` : '';
+
     const [[kpis]] = await pool.execute(`
       SELECT COUNT(*) AS item_count,
         ROUND(SUM(value_inr),2) AS total_value,
         COUNT(DISTINCT vendor_code) AS vendor_count,
         SUM(CASE WHEN aging_days > 90 THEN 1 ELSE 0 END) AS critical_count,
         ROUND(AVG(aging_days)) AS avg_age
-      FROM git_items
-    `);
+      FROM git_items ${gitWhere}
+    `, gitBinds);
 
     const [byBucket] = await pool.execute(`
       SELECT CASE
@@ -256,19 +281,22 @@ router.get('/git', async (req, res) => {
       END AS bucket,
       COUNT(*) AS cnt,
       ROUND(SUM(value_inr),2) AS total_value
-      FROM git_items GROUP BY bucket ORDER BY MIN(aging_days)
-    `);
+      FROM git_items ${gitWhere} GROUP BY bucket ORDER BY MIN(aging_days)
+    `, gitBinds);
 
+    const gitProductWhere = gitConds.length
+      ? `WHERE product IS NOT NULL AND ${gitConds.join(' AND ')}`
+      : 'WHERE product IS NOT NULL';
     const [byProduct] = await pool.execute(`
       SELECT product, ROUND(SUM(value_inr),2) AS total_value, COUNT(*) AS cnt
-      FROM git_items WHERE product IS NOT NULL
+      FROM git_items ${gitProductWhere}
       GROUP BY product ORDER BY total_value DESC
-    `);
+    `, gitBinds);
 
     const [byVendor] = await pool.execute(`
       SELECT vendor_code, ROUND(SUM(value_inr),2) AS total_value, COUNT(*) AS cnt
-      FROM git_items GROUP BY vendor_code ORDER BY total_value DESC LIMIT 15
-    `);
+      FROM git_items ${gitWhere} GROUP BY vendor_code ORDER BY total_value DESC LIMIT 15
+    `, gitBinds);
 
     res.json({ kpis, byBucket, byProduct, byVendor });
   } catch (err) {
@@ -288,8 +316,8 @@ router.get('/dashboard', async (req, res) => {
       SELECT
         COUNT(*) AS total_items,
         ROUND(SUM(total_value),2) AS total_value,
-        ROUND(AVG(aging_days)) AS avg_age,
-        ROUND(SUM(CASE WHEN aging_days > 180 THEN total_value ELSE 0 END),2) AS dead_stock_value,
+        ROUND(AVG(CASE WHEN aging_days >= 0 AND aging_days <= 9999 THEN aging_days END)) AS avg_age,
+        ROUND(SUM(CASE WHEN aging_days BETWEEN 181 AND 9999 THEN total_value ELSE 0 END),2) AS dead_stock_value,
         COUNT(DISTINCT material) AS material_count,
         COUNT(DISTINCT storage_location) AS location_count
       FROM inventory_items ${where}
@@ -304,7 +332,7 @@ router.get('/dashboard', async (req, res) => {
     const [byLocation] = await pool.execute(`
       SELECT storage_location,
         ROUND(SUM(total_value),2) AS total_value,
-        ROUND(AVG(aging_days)) AS avg_age
+        ROUND(AVG(CASE WHEN aging_days >= 0 AND aging_days <= 9999 THEN aging_days END)) AS avg_age
       FROM inventory_items ${where}
       GROUP BY storage_location ORDER BY total_value DESC LIMIT 20
     `, binds);
@@ -320,7 +348,7 @@ router.get('/dashboard', async (req, res) => {
     const [topMaterials] = await pool.execute(`
       SELECT material, material_desc, product_type,
         ROUND(SUM(total_value),2) AS total_value,
-        ROUND(AVG(aging_days)) AS avg_age
+        ROUND(AVG(CASE WHEN aging_days >= 0 AND aging_days <= 9999 THEN aging_days END)) AS avg_age
       FROM inventory_items ${where}
       GROUP BY material, material_desc, product_type
       ORDER BY total_value DESC LIMIT 20

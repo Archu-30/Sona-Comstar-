@@ -9,6 +9,7 @@ import InTransit from './pages/InTransit';
 import ProductAnalytics from './pages/ProductAnalytics';
 import Reports from './pages/Reports';
 import ReportHistory from './pages/ReportHistory';
+import Profile from './pages/Profile';
 import Login from './pages/Login';
 
 function PageBoundary({ children }) {
@@ -54,6 +55,7 @@ export default function App() {
             <Route path="/product-analytics" element={<PageBoundary><ProductAnalytics /></PageBoundary>} />
             <Route path="/reports"         element={<PageBoundary><Reports /></PageBoundary>} />
             <Route path="/report-history"  element={<PageBoundary><ReportHistory /></PageBoundary>} />
+            <Route path="/profile"         element={<PageBoundary><Profile /></PageBoundary>} />
           </Routes>
         </AppShell>
       </RequireAuth>

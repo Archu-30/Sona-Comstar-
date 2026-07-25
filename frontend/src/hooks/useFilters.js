@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
 
-const API = 'http://localhost:5000';
+const API = '';
 
 export function useFilterOptions() {
   return useQuery({

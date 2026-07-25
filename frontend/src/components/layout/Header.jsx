@@ -1,18 +1,13 @@
-import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Menu,
-  Bell,
   LogOut,
-  Settings,
   User,
   ChevronRight,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useSidebarStore } from '../../store/sidebarStore';
 import { Button } from '../ui/Button';
-import { Badge } from '../ui/Badge';
-import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -45,7 +40,6 @@ export function Header({ onMobileMenuOpen }) {
   const { toggle } = useSidebarStore();
   const breadcrumbs = useBreadcrumbs();
   const navigate = useNavigate();
-  const [notificationCount] = useState(3);
 
   const handleLogout = () => {
     localStorage.removeItem('sona_auth');
@@ -97,26 +91,13 @@ export function Header({ onMobileMenuOpen }) {
 
       <div className="ml-auto flex items-center gap-2">
         <UploadButton />
-        {/* Notifications */}
-        <Button variant="ghost" size="icon" className="relative">
-          <Bell className="size-5" />
-          {notificationCount > 0 && (
-            <Badge className="absolute -right-0.5 -top-0.5 flex size-4 items-center justify-center rounded-full p-0 text-[10px]">
-              {notificationCount}
-            </Badge>
-          )}
-          <span className="sr-only">Notifications</span>
-        </Button>
 
         {/* User menu */}
         <DropdownMenu>
           <DropdownMenuTrigger className="cursor-pointer rounded-full ring-offset-background transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
-            <Avatar className="size-8 border border-border/50">
-              <AvatarImage src="" alt="User" />
-              <AvatarFallback className="bg-gradient-to-br from-primary/80 to-accent/80 text-xs font-semibold text-white">
-                SC
-              </AvatarFallback>
-            </Avatar>
+            <div className="flex size-9 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 via-violet-600 to-cyan-600 text-white shadow-sm ring-2 ring-primary/20">
+              <User className="size-5 text-white" />
+            </div>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
             <DropdownMenuLabel className="font-normal">
@@ -129,13 +110,9 @@ export function Header({ onMobileMenuOpen }) {
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuGroup>
-              <DropdownMenuItem>
+              <DropdownMenuItem onClick={() => navigate('/profile')}>
                 <User className="mr-2 size-4" />
                 Profile
-              </DropdownMenuItem>
-              <DropdownMenuItem>
-                <Settings className="mr-2 size-4" />
-                Settings
               </DropdownMenuItem>
             </DropdownMenuGroup>
             <DropdownMenuSeparator />

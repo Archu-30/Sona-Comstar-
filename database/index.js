@@ -28,8 +28,12 @@ const FILES = {
   summaryReport: path.join(DATA_DIR, 'SUMMARY FILE.xlsx'),
 };
 
+// When setSourceFile('ageing', …) has been called explicitly (seed or upload),
+// that exact file is parsed — the "latest upload" auto-discovery is bypassed.
+let ageingExplicitlySet = false;
+
 function setSourceFile(kind, filePath) {
-  if (kind === 'ageing') FILES.inventoryAgeing = filePath;
+  if (kind === 'ageing') { FILES.inventoryAgeing = filePath; ageingExplicitlySet = true; }
   else if (kind === 'git') FILES.importGIT = filePath;
   else if (kind === 'summary') FILES.summaryReport = filePath;
   else throw new Error('Unknown source kind: ' + kind);
@@ -40,13 +44,32 @@ function getSummaryReportPath() {
   return FILES.summaryReport;
 }
 
+const MIN_AGEING_FILE_SIZE = 100 * 1024; // 100KB — a real ageing report is several MB
+
 // Latest uploaded inventory ageing file wins over the bundled default.
 // Uploads are saved as "upload_<timestamp>_<original name>" in DATA_DIR.
+// Files smaller than MIN_AGEING_FILE_SIZE are skipped (likely test/partial uploads).
 function resolveLatestAgeingFile() {
+  // Explicit source (set by seed or upload) always wins — parse exactly that file.
+  if (ageingExplicitlySet) {
+    console.log(`[DATA LOAD] Using explicitly set ageing file: ${path.basename(FILES.inventoryAgeing)}`);
+    return FILES.inventoryAgeing;
+  }
   try {
     const uploads = fs
       .readdirSync(DATA_DIR)
       .filter((f) => /^upload_\d+_.*(ageing|aging).*\.(xlsx|xls|xlsb)$/i.test(f))
+      .filter((f) => {
+        const fullPath = path.join(DATA_DIR, f);
+        try {
+          const stat = fs.statSync(fullPath);
+          if (stat.size < MIN_AGEING_FILE_SIZE) {
+            console.log(`[DATA LOAD] Skipping small upload (${Math.round(stat.size / 1024)}KB): ${f}`);
+            return false;
+          }
+          return true;
+        } catch { return false; }
+      })
       .map((f) => ({ f, ts: Number(f.match(/^upload_(\d+)_/)[1]) }))
       .sort((a, b) => b.ts - a.ts);
     if (uploads.length > 0) {
@@ -59,6 +82,9 @@ function resolveLatestAgeingFile() {
   }
   return FILES.inventoryAgeing;
 }
+
+// Original bundled file path (not affected by uploads)
+const ORIGINAL_AGEING_PATH = FILES.inventoryAgeing;
 
 function getSourceFiles() {
   return { ...FILES };
@@ -642,6 +668,10 @@ function clearCache() {
   cachedData = null;
 }
 
+function getOriginalAgeingPath() {
+  return ORIGINAL_AGEING_PATH;
+}
+
 module.exports = {
   getClosingInventory,
   getClosingInventoryFlat,
@@ -655,4 +685,5 @@ module.exports = {
   setSourceFile,
   getSourceFiles,
   getSummaryReportPath,
+  getOriginalAgeingPath,
 };

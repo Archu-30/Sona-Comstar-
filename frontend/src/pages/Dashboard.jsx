@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useState } from 'react';
+import { useMemo, useCallback, useState, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import * as echarts from 'echarts/core';
@@ -33,7 +33,7 @@ import { useFilterStore } from '../store/filterStore';
 import { useFilterOptions } from '../hooks/useFilters';
 import { Button } from '../components/ui/Button';
 import { formatCurrency, formatNumber, formatCompact } from '../lib/formatters';
-import { STORAGE_LOCATIONS } from '../config/constants';
+import { STORAGE_LOCATIONS, STORAGE_AGE_BUCKETS } from '../config/constants';
 
 echarts.use([
   BarChart,
@@ -358,11 +358,63 @@ const MONTH_IDX = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10
 
 export default function DashboardPage() {
   const queryClient = useQueryClient();
-  const { data, isLoading, isError, error, dataUpdatedAt } = useDashboardSummary();
+  const [selectedYears, setSelectedYears] = useState([]);
+  const [selectedMonths, setSelectedMonths] = useState([]);
+  const [selectedDates, setSelectedDates] = useState([]);
+  const [selectedProducts, setSelectedProducts] = useState([]);
+  const [selectedLocations, setSelectedLocations] = useState([]);
+  const [selectedBuckets, setSelectedBuckets] = useState([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const { data: filterOptions = {} } = useFilterOptions();
-  const gf = useFilterStore();
+
+  const MONTH_NAMES_FULL = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+
+  const yearQuery = selectedYears.length === 1 ? selectedYears[0] : '';
+  const monthName = selectedMonths.length === 1 ? selectedMonths[0] : '';
+  const monthQuery = monthName ? String(MONTH_NAMES_FULL.indexOf(monthName) + 1) : '';
+  const datesQuery = selectedDates.length > 0 ? selectedDates : [];
+
+  const { data, isLoading, isError, error, dataUpdatedAt } = useDashboardSummary({
+    year: yearQuery,
+    month: monthQuery,
+    dates: datesQuery,
+  });
+
+  const maxDays = useMemo(() => {
+    const years = selectedYears.length > 0 ? selectedYears.map(Number) : [new Date().getFullYear()];
+    const months = selectedMonths.length > 0 ? selectedMonths.map(m => MONTH_NAMES_FULL.indexOf(m)) : Array.from({length: 12}, (_, i) => i);
+    
+    let max = 31;
+    if (selectedMonths.length > 0) {
+      max = 0;
+      for (const y of years) {
+        for (const m of months) {
+          if (m >= 0 && m < 12) {
+            const days = new Date(y, m + 1, 0).getDate();
+            if (days > max) max = days;
+          }
+        }
+      }
+    }
+    return max;
+  }, [selectedYears, selectedMonths]);
+
+  const dateOptions = useMemo(() => {
+    return Array.from({ length: maxDays }, (_, i) => String(i + 1));
+  }, [maxDays]);
+
+  useEffect(() => {
+    if (selectedDates.length > 0) {
+      const validDates = selectedDates.filter(d => Number(d) <= maxDays);
+      if (validDates.length !== selectedDates.length) {
+        setSelectedDates(validDates);
+      }
+    }
+  }, [maxDays, selectedDates]);
 
   const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
@@ -370,26 +422,91 @@ export default function DashboardPage() {
     setIsRefreshing(false);
   }, [queryClient]);
 
+  const grYearOptions = useMemo(() => filterOptions.years?.map(String) || [], [filterOptions]);
+  const grMonthOptions = useMemo(() => filterOptions.months?.map((m) => m.name) || [], [filterOptions]);
+
+  const productTypeOptions = useMemo(() => {
+    if (!data?.inventory?.inventoryByType) return [];
+    return [...new Set(data.inventory.inventoryByType.map((t) => t.type))].sort();
+  }, [data]);
+
+  const locationOptions = useMemo(() => {
+    if (!data?.ageing?.storageLocationAgeing) return [];
+    return [...new Set(data.ageing.storageLocationAgeing.map((l) => l.storageLocation))].sort();
+  }, [data]);
+
   const allPeriods = data?.inventory?.periodSummaries ?? [];
 
   const filteredPeriods = useMemo(() => {
     return allPeriods.filter((p) => {
       const [monthName, year] = p.period.split(' ');
-      if (gf.years.length > 0 && !gf.years.includes(year)) return false;
-      if (gf.months.length > 0 && !gf.months.includes(String(MONTH_IDX[monthName] ?? 0))) return false;
+      if (selectedYears.length > 0 && !selectedYears.includes(year)) return false;
+      if (selectedMonths.length > 0 && !selectedMonths.includes(monthName)) return false;
       return true;
     });
-  }, [allPeriods, gf.years, gf.months]);
+  }, [allPeriods, selectedYears, selectedMonths]);
+
+  // Client-side filtering of summary aggregates for local filters
+  const filteredInventoryByType = useMemo(() => {
+    if (!data?.inventory?.inventoryByType) return [];
+    return data.inventory.inventoryByType.filter((t) => {
+      if (selectedProducts.length > 0 && !selectedProducts.includes(t.type)) return false;
+      return true;
+    });
+  }, [data, selectedProducts]);
+
+  const filteredAgeingBuckets = useMemo(() => {
+    if (!data?.ageing?.buckets) return [];
+    return data.ageing.buckets.filter((b) => {
+      if (selectedBuckets.length > 0 && !selectedBuckets.includes(b.bucket)) return false;
+      return true;
+    });
+  }, [data, selectedBuckets]);
+
+  const filteredStorageLocations = useMemo(() => {
+    if (!data?.ageing?.storageLocationAgeing) return [];
+    return data.ageing.storageLocationAgeing.filter((l) => {
+      if (selectedLocations.length > 0 && !selectedLocations.includes(l.storageLocation)) return false;
+      return new Set(STORAGE_LOCATIONS).has(l.storageLocation);
+    });
+  }, [data, selectedLocations]);
 
   const kpis = useMemo(() => {
     if (!data) return null;
     const { inventory, importStats } = data;
+    
+    let totalValue = inventory.totalValue;
+    let totalStock = inventory.totalStock;
+    let importValue = importStats.totalImportValue;
+    
+    if (selectedProducts.length > 0) {
+      const matched = inventory.inventoryByType.filter(t => selectedProducts.includes(t.type));
+      totalValue = matched.reduce((s, t) => s + t.totalValue, 0);
+      totalStock = matched.reduce((s, t) => s + t.totalStock, 0);
+      const gitMatched = importStats.importByProduct?.filter(t => selectedProducts.includes(t.product)) || [];
+      if (gitMatched.length > 0) {
+        importValue = gitMatched.reduce((s, t) => s + t.totalValue, 0);
+      }
+    }
+    
+    if (selectedLocations.length > 0) {
+      const matched = data.ageing.storageLocationAgeing.filter(l => selectedLocations.includes(l.storageLocation));
+      totalValue = matched.reduce((s, l) => s + l.totalValue, 0);
+      totalStock = matched.reduce((s, l) => s + l.totalQuantity, 0);
+    }
+    
+    if (selectedBuckets.length > 0) {
+      const matched = data.ageing.buckets.filter(b => selectedBuckets.includes(b.bucket));
+      totalValue = matched.reduce((s, b) => s + b.totalValue, 0);
+      totalStock = matched.reduce((s, b) => s + b.totalQuantity, 0);
+    }
+    
     return {
-      totalInventoryValue: inventory.totalValue,
-      totalStock: inventory.totalStock,
-      importValue: importStats.totalImportValue,
+      totalInventoryValue: totalValue,
+      totalStock: totalStock,
+      importValue: importValue,
     };
-  }, [data]);
+  }, [data, selectedProducts, selectedLocations, selectedBuckets]);
 
   const lastRefreshed = useMemo(() => {
     if (!dataUpdatedAt) return null;
@@ -443,12 +560,16 @@ export default function DashboardPage() {
         }
       />
 
+      {/* Filter Order: Year, Month, Date, Product Type, Storage Location, Age Bucket */}
       {!isLoading && (
-        <GlobalFilters
-          filters={gf}
-          onChange={(f) => gf.setFilters(f)}
-          options={filterOptions}
-        />
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 rounded-xl border border-border/50 bg-card p-4 items-end">
+          <MultiSelect label="Year" options={grYearOptions} selected={selectedYears} onChange={setSelectedYears} />
+          <MultiSelect label="Month" options={grMonthOptions} selected={selectedMonths} onChange={setSelectedMonths} />
+          <MultiSelect label="Date" options={dateOptions} selected={selectedDates} onChange={setSelectedDates} />
+          <MultiSelect label="Product Type" options={productTypeOptions} selected={selectedProducts} onChange={setSelectedProducts} />
+          <MultiSelect label="Storage Location" options={locationOptions} selected={selectedLocations} onChange={setSelectedLocations} searchable />
+          <MultiSelect label="Age Bucket" options={STORAGE_AGE_BUCKETS} selected={selectedBuckets} onChange={setSelectedBuckets} />
+        </div>
       )}
 
       {isLoading || !kpis ? (
@@ -473,10 +594,10 @@ export default function DashboardPage() {
       ) : (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <ChartContainer title="Inventory Value by Type" subtitle="Distribution across inventory classification types" index={0}>
-            <ReactEChartsCore echarts={echarts} option={buildDonutOption(data.inventory.inventoryByType)} style={{ height: 320 }} opts={{ renderer: 'canvas' }} notMerge />
+            <ReactEChartsCore echarts={echarts} option={buildDonutOption(filteredInventoryByType)} style={{ height: 320 }} opts={{ renderer: 'canvas' }} notMerge />
           </ChartContainer>
           <ChartContainer title="Storage Age Distribution" subtitle="Value breakdown by aging buckets (GR Issue Date)" index={1}>
-            <ReactEChartsCore echarts={echarts} option={buildAgeingBarOption(data.ageing.buckets)} style={{ height: 320 }} opts={{ renderer: 'canvas' }} notMerge />
+            <ReactEChartsCore echarts={echarts} option={buildAgeingBarOption(filteredAgeingBuckets)} style={{ height: 320 }} opts={{ renderer: 'canvas' }} notMerge />
           </ChartContainer>
         </div>
       )}
@@ -492,11 +613,7 @@ export default function DashboardPage() {
             <ReactEChartsCore echarts={echarts} option={buildMonthlyValueOption(filteredPeriods.length > 0 ? filteredPeriods : data.inventory.periodSummaries)} style={{ height: 360 }} opts={{ renderer: 'canvas' }} notMerge />
           </ChartContainer>
           <ChartContainer title="Storage Location Analytics" subtitle="Inventory value by storage location" index={3}>
-            <ReactEChartsCore echarts={echarts} option={buildStorageLocationOption(
-              data.ageing.storageLocationAgeing.filter((l) =>
-                new Set(STORAGE_LOCATIONS).has(l.storageLocation)
-              )
-            )} style={{ height: 360 }} opts={{ renderer: 'canvas' }} notMerge />
+            <ReactEChartsCore echarts={echarts} option={buildStorageLocationOption(filteredStorageLocations)} style={{ height: 360 }} opts={{ renderer: 'canvas' }} notMerge />
           </ChartContainer>
         </div>
       )}
